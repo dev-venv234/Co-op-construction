@@ -8,9 +8,9 @@ local Net = {}
 Net.Names = {
 	-- client -> server (requests only; the server validates everything)
 	"Hello", "PickRole", "TimingTap", "ConnectSubmit", "CancelTask", "DropItem", "DriveInput",
-	"QuickJoin", "Ping", "KickVote", "SaveSettings", "Company", "MachineInput",
+	"QuickJoin", "Ping", "KickVote", "SaveSettings", "Company", "MachineInput", "TraceSubmit", "GaugeHold", "Shop",
 	-- server -> client
-	"State", "TaskBegin", "TaskEnd", "Toast", "Payout", "PingShown", "Sfx", "CompanyData",
+	"State", "TaskBegin", "TaskEnd", "Toast", "Payout", "PingShown", "Sfx", "CompanyData", "ShopData",
 }
 
 local folder = ReplicatedStorage:WaitForChild("Remotes")

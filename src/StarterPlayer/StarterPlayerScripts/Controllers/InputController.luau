@@ -17,6 +17,18 @@ function Input.BindTap(name: string, cb: () -> (), ...: Enum.KeyCode)
 	end, false, PRIORITY, ...)
 end
 
+-- Calls cb(true) on press and cb(false) on release (hold buttons, e.g. the Gauge task). Sinks the key while bound.
+function Input.BindHold(name: string, cb: (boolean) -> (), ...: Enum.KeyCode)
+	ContextActionService:BindActionAtPriority(name, function(_, state)
+		if state == Enum.UserInputState.Begin then
+			cb(true)
+		elseif state == Enum.UserInputState.End or state == Enum.UserInputState.Cancel then
+			cb(false)
+		end
+		return Enum.ContextActionResult.Sink
+	end, false, PRIORITY, ...)
+end
+
 function Input.Unbind(name: string)
 	ContextActionService:UnbindAction(name)
 end

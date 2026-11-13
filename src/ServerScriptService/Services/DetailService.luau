@@ -296,6 +296,18 @@ local function buildRoof(j: Job, deck: BasePart)
 	end
 end
 
+-- The outdoor AC unit (HVAC): fan grille and hub on top, cooling fins on the sides, a concrete pad under it.
+local function acUnit(p: BasePart)
+	local cf, s = p.CFrame, p.Size
+	local up = CFrame.Angles(0, 0, math.pi / 2)
+	deco(p, "FanGrille", Vector3.new(0.12, s.X * 0.8, s.Z * 0.8), cf * CFrame.new(0, s.Y / 2 + 0.04, 0) * up, C(45, 47, 52), M.DiamondPlate, Enum.PartType.Cylinder)
+	deco(p, "FanHub", Vector3.new(0.22, 0.7, 0.7), cf * CFrame.new(0, s.Y / 2 + 0.12, 0) * up, C(30, 30, 34), M.Metal, Enum.PartType.Cylinder)
+	for _, side in { -1, 1 } do
+		deco(p, "CoolingFins", Vector3.new(0.08, s.Y * 0.7, s.Z * 0.85), cf * CFrame.new(side * (s.X / 2 + 0.04), -0.1, 0), C(150, 154, 160), M.DiamondPlate)
+	end
+	deco(p, "ACPad", Vector3.new(s.X + 1, 0.3, s.Z + 1), cf * CFrame.new(0, -s.Y / 2 - 0.1, 0), C(176, 174, 168), M.Concrete)
+end
+
 -- Called when the last sheet over a roof deck goes on (and for decks with no sheets).
 local function roofReady(j: Job, cur: any, deckId: string)
 	local deck = cur.slots[deckId]
@@ -323,6 +335,8 @@ function Detail.OnDone(cur: any, slot: any)
 		local id = slot.def.Id :: string
 		if string.sub(id, 1, 4) == "wall" then
 			dressWall(j, slot)
+		elseif id == "acunit" then
+			acUnit(slot.part)
 		elseif string.sub(id, 1, 4) == "nail" then
 			slot.part.Transparency = 1 -- the nails are in the wall now (no metal cube stuck on the outside)
 		elseif string.sub(id, 1, 5) == "sheet" then

@@ -1,9 +1,10 @@
 --!strict
--- Trades playable in the gray box: display text and crew slot limits. No money in here.
+-- Trades: display text and crew slot limits. No money in here.
 local C = Color3.fromRGB
 
 return {
-	Order = { "Foreman", "Laborer", "Operator", "Electrician" },
+	-- Welder and HVAC added 2026-11-13 (owner request; PLAN.md had 4 launch trades)
+	Order = { "Foreman", "Laborer", "Operator", "Electrician", "Welder", "HVAC" },
 	Info = {
 		Foreman = {
 			Max = 1,
@@ -24,6 +25,16 @@ return {
 			Max = 2,
 			Color = C(240, 200, 40),
 			Description = "Sets outlet boxes, runs circuits, mounts the panel and lights. Powers it on.",
+		},
+		Welder = {
+			Max = 2,
+			Color = C(235, 110, 50),
+			Description = "Welds the steel: pier plates, roof brackets, railings and hinges. Trace the seam.",
+		},
+		HVAC = {
+			Max = 2,
+			Color = C(70, 190, 200),
+			Description = "Runs the ductwork, sets the vents, places the AC unit and charges it.",
 		},
 	},
 }

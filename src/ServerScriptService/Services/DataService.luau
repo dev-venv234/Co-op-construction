@@ -1,6 +1,7 @@
 --!strict
 -- Player profiles in a DataStore. When someone joins, everything they had comes back:
---   Cash, trade XP (all 4 trades), FirstPayout (unlocks the RV start), LastTrade (re-picked automatically),
+--   Cash, trade XP (all 6 trades), FirstPayout (unlocks the RV start), LastTrade (re-picked automatically),
+--   Tools bought at the tool shop (v5, 2026-11-13: also the Welder and HVAC trades),
 --   Stats (jobs done, total earned, best grade), owned Vehicles, the Truck the player takes on jobs, and their
 --   Settings (volumes, graphics, controls: saved through the validated SaveSettings remote, shown to the client as the
 --   "Settings" attribute).
@@ -19,7 +20,7 @@ local Data = {}
 Data.Loaded = Instance.new("BindableEvent") -- (player)
 
 local STORE_NAME = "CoopProfiles_v1"
-local VERSION = 4
+local VERSION = 5
 local LOCK_SECONDS = 300
 local AUTOSAVE_SECONDS = 120
 local GRADE_RANK = { ["A+"] = 5, A = 4, B = 3, C = 2, D = 1 }
@@ -33,7 +34,8 @@ local function default(): { [string]: any }
 		Version = VERSION,
 		Cash = 0,
 		FirstPayout = false,
-		XP = { Foreman = 0, Laborer = 0, Operator = 0, Electrician = 0 },
+		XP = { Foreman = 0, Laborer = 0, Operator = 0, Electrician = 0, Welder = 0, HVAC = 0 },
+		Tools = {}, -- tool shop: [toolId] = true (ToolShopService)
 		LastTrade = "",
 		Stats = { JobsDone = 0, TotalEarned = 0, BestGrade = "" },
 		Vehicles = { StarterTruck = true },
@@ -91,6 +93,18 @@ local SETTING_RULES: { [string]: any } = {
 local lastSettings: { [Player]: number } = {}
 
 -- Display copies for the client (truck dealer prompt text): "Trucks" = owned kinds, "Truck" = the one in use.
+-- Owned tools for the client (the shop panel and the HUD), as a comma list.
+local function publishTools(p: Player, prof: any)
+	local list = {}
+	for id, owned in prof.Tools or {} do
+		if owned == true then
+			table.insert(list, id)
+		end
+	end
+	table.sort(list)
+	p:SetAttribute("Tools", table.concat(list, ","))
+end
+
 local function publishTrucks(p: Player, prof: any)
 	local owned = {}
 	for kind, has in prof.Vehicles do
@@ -170,6 +184,7 @@ local function load(p: Player)
 	p:SetAttribute("RVUnlocked", data.FirstPayout == true)
 	p:SetAttribute("JobsDone", data.Stats.JobsDone)
 	publishTrucks(p, data)
+	publishTools(p, data)
 	p:SetAttribute("Settings", HttpService:JSONEncode(data.Settings))
 	Data.Loaded:Fire(p)
 end
@@ -223,6 +238,21 @@ function Data.GrantVehicle(p: Player, kind: string)
 	if prof then
 		prof.Vehicles[kind] = true
 		publishTrucks(p, prof)
+	end
+end
+
+function Data.HasTool(p: Player, id: string): boolean
+	local prof = profiles[p]
+	return prof ~= nil and type(prof.Tools) == "table" and prof.Tools[id] == true
+end
+
+-- Only call after the tool was paid for (ToolShopService).
+function Data.GrantTool(p: Player, id: string)
+	local prof = profiles[p]
+	if prof then
+		prof.Tools = if type(prof.Tools) == "table" then prof.Tools else {}
+		prof.Tools[id] = true
+		publishTools(p, prof)
 	end
 end
 

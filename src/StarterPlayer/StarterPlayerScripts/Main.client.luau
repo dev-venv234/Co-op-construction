@@ -10,6 +10,8 @@ local list: { Instance } = {
 	Controllers:WaitForChild("SettingsController"), -- before the controllers that read settings
 	TaskControllers:WaitForChild("Timing"),
 	TaskControllers:WaitForChild("Connect"),
+	TaskControllers:WaitForChild("Trace"),
+	TaskControllers:WaitForChild("Gauge"),
 	Controllers:WaitForChild("VehicleController"),
 	Controllers:WaitForChild("WheelController"),
 	Controllers:WaitForChild("TrackController"),
@@ -17,6 +19,7 @@ local list: { Instance } = {
 	Controllers:WaitForChild("SiteBoardController"),
 	Controllers:WaitForChild("RainController"),
 	Controllers:WaitForChild("DealerController"),
+	Controllers:WaitForChild("ToolShopController"),
 	RoleControllers:WaitForChild("PromptFilter"),
 	Controllers:WaitForChild("GuideController"),
 	Controllers:WaitForChild("CrewController"),

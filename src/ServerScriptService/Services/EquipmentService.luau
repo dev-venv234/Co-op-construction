@@ -67,6 +67,7 @@ export type Rig = {
 	lastPos: Vector3?,
 	-- hands-on control
 	input: { a: number, b: number, c: number, at: number }?,
+	boost: number?, -- control speed from the operator's tools (Precision Joysticks), 1 = none
 	session: any?, -- the machine task being done by hand (see BeginManual)
 	auto: boolean?, -- a canned motion is playing (controls ignored)
 	attrAt: number?,
@@ -1034,6 +1035,7 @@ end
 
 function Equipment.SetInput(rig: Rig, a: number, b: number, c: number)
 	rig.input = { a = math.clamp(a, -1, 1), b = math.clamp(b, -1, 1), c = math.clamp(c, -1, 1), at = os.clock() }
+	rig.boost = 1
 end
 
 local function step(dt: number)
@@ -1044,9 +1046,10 @@ local function step(dt: number)
 		end
 		local inp = rig.input
 		local live = inp ~= nil and now - inp.at < INPUT_TTL
-		local a = if live then (inp :: any).a else 0
-		local b = if live then (inp :: any).b else 0
-		local c = if live then (inp :: any).c else 0
+		local k = rig.boost or 1
+		local a = if live then (inp :: any).a * k else 0
+		local b = if live then (inp :: any).b * k else 0
+		local c = if live then (inp :: any).c * k else 0
 		if rig.kind == "Crane" then
 			if rig.mode == "drive" then
 				checkSetUp(rig, dt)
@@ -1469,6 +1472,7 @@ local function onInput(p: Player, a: unknown, b: unknown, c: unknown)
 	for _, r in rigs do
 		if r.seat == seatPart and r.model.Parent then
 			Equipment.SetInput(r, A :: number, B :: number, Cc :: number)
+			r.boost = if S.ToolShopService then S.ToolShopService.Bonus(p, "machine") else 1
 			return
 		end
 	end

@@ -29,7 +29,7 @@ for _, c in corners do
 		Label = "Set post", Requires = { "hole_" .. c.id },
 		Pos = Vector3.new(c.x, 3.5, c.z), Size = Vector3.new(1, 7, 1),
 		Done = { Color = C(150, 110, 70), Material = "Wood" } })
-	add({ Id = "pour_" .. c.id, Kind = "Timing", Role = "Laborer", Phase = "Foundation",
+	add({ Id = "pour_" .. c.id, Kind = "Gauge", Style = "Pour", Role = "Laborer", Phase = "Foundation",
 		Label = "Pour concrete", Requires = { "post_" .. c.id },
 		Pos = Vector3.new(c.x, 0.25, c.z), Size = Vector3.new(2.4, 0.5, 2.4),
 		Done = { Color = C(170, 170, 165), Material = "Concrete" } })
@@ -39,7 +39,7 @@ add({ Id = "deliver", Kind = "Deliver", Role = "Operator", Phase = "Site prep",
 	Label = "Unload lumber", Pos = Vector3.new(22, 0.1, -4), Size = Vector3.new(18, 0.2, 18), Reach = 20,
 	Done = { Color = C(150, 150, 150), Material = "Concrete", Transparency = 0.6 }, Collide = false })
 
-add({ Id = "level", Kind = "Timing", Role = "Foreman", Phase = "Foundation",
+add({ Id = "level", Kind = "Gauge", Style = "Level", Role = "Foreman", Phase = "Foundation",
 	Label = "Level check", Requires = { "pour_NW", "pour_NE", "pour_SW", "pour_SE" },
 	Pos = Vector3.new(0, 1.5, 10), Size = Vector3.new(1, 3, 1),
 	Done = { Color = C(255, 220, 0), Material = "Metal" }, Collide = false })
@@ -64,7 +64,7 @@ for _, w in walls do
 	add({ Id = "wall_" .. w.id, Kind = "Place", Item = "Lumber", Role = "Laborer", Phase = "Framing",
 		Label = "Raise wall", Requires = { "floor_1", "floor_2" }, Pos = w.pos, Size = w.size,
 		Done = { Color = C(215, 180, 130), Material = "WoodPlanks" }, Collide = not w.door })
-	add({ Id = "nail_" .. w.id, Kind = "Timing", Role = w.role, Phase = "Framing",
+	add({ Id = "nail_" .. w.id, Kind = "Timing", Hits = 3, Role = w.role, Phase = "Framing",
 		Label = if w.role == "Foreman" then "Brace & nail wall" else "Nail wall", Requires = { "wall_" .. w.id },
 		Pos = w.nail, Size = Vector3.new(0.8, 0.8, 0.8),
 		Done = { Color = C(90, 90, 95), Material = "Metal" }, Collide = false })
@@ -83,6 +83,17 @@ add({ Id = "sheet_2", Kind = "Place", Item = "Sheet", Role = "Laborer", Phase = 
 	Label = "Lay roof sheet", Requires = { "roof" },
 	Pos = Vector3.new(0, 9.05, 22.5), Size = Vector3.new(13.4, 0.3, 5),
 	Done = { Color = C(120, 120, 130), Material = "CorrodedMetal" } })
+-- Welder (2026-11-13): the door's two hinges and a roof bracket
+for k, y in { 2.6, 6.2 } do
+	add({ Id = "hinge_" .. k, Kind = "Trace", Role = "Welder", Phase = "Framing",
+		Label = "Weld door hinge", Requires = { "wall_S" },
+		Pos = Vector3.new(-2.3, y, 25.35), Size = Vector3.new(0.3, 0.8, 0.25),
+		Done = { Color = C(70, 72, 78), Material = "Metal" }, Collide = false })
+end
+add({ Id = "bracket", Kind = "Trace", Role = "Welder", Phase = "Roof",
+	Label = "Weld roof bracket", Requires = { "roof" },
+	Pos = Vector3.new(6.4, 8.15, 20), Size = Vector3.new(0.5, 0.6, 1.2),
+	Done = { Color = C(110, 113, 120), Material = "Metal" }, Collide = false })
 add({ Id = "light", Kind = "Connect", Role = "Electrician", Phase = "Roof",
 	Label = "Wire work light", Requires = { "roof" },
 	Pos = Vector3.new(11, 1.5, 28), Size = Vector3.new(2, 3, 2),

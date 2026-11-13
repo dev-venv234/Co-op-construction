@@ -23,6 +23,7 @@ deadline while things go wrong, then gets paid and upgrades. Players *are* the c
 - **Trades:** each levels up separately. Every phase gives every trade work — **no trade idle more than 1 minute**.
 - **Building:** only fill glowing ghost outlines. No freeform building (prevents griefing, makes scoring easy).
 - **Four task types** power every trade: **Carry** (haul to zone, weight slows you), **Place** (snap into ghost outline), **Timing** (hit a moving window), **Connect** (route puzzle A→B).
+  Since 2026-11-13 (owner request) two more: **Trace** (follow a weld seam) and **Gauge** (hold to keep a needle in the green).
 - **Quality score:** accuracy of every task rolls up into a job grade.
 - **Inspection:** inspector walks the house; mistakes cost pay; skipped steps cause partial **collapse**.
 - **Payout:** base pay × quality (0.5×–1.5×), +25% for finishing early, minus damage/rework. Whoever causes damage gets no pay for it.
@@ -57,7 +58,8 @@ Starter house phases: Site prep (0–2) → Foundation (2–5) → Framing (5–
 
 Not at launch: Plumber, Concrete, tiers 3–5, oil rigs, extra chaos events, dually/custom trucks,
 truck customization, tool upgrades, premium trucks/cosmetics, invite bonus.
-(Companies + the company leaderboard were on this list; the owner pulled them in on 2026-11-12, see Roadmap status.)
+(Companies + the company leaderboard were on this list; the owner pulled them in on 2026-11-12, see Roadmap status.
+The owner also pulled in two more trades, Welder and HVAC, and a tool shop on 2026-11-13: 6 trades now.)
 
 ## Coding rules (non-negotiable)
 1. **The server owns all money and all placement.** The client only *requests*; the server validates and applies.
@@ -457,12 +459,50 @@ truck customization, tool upgrades, premium trucks/cosmetics, invite bonus.
     crane axles roll while driving; Starter House dressed (screenshot: siding, shuttered windows, red door + stoop,
     shingle roof, chimney, gutters) A $2,712; Shed (green barn shed, X door, window, shingle roof) A $906; no errors.
 
-## Next up (owner wishlist, 2026-11-12 — not built yet)
-- **Tool shop** in town (buy/upgrade tools; remember: never sell anything that finishes a job without the crew).
-- **Welding trade** with its own task: follow a line (trace a seam with the finger/mouse; accuracy = how close you stay).
-- **HVAC trade** (ducts, vents, units; a routing-style task fits).
-- **Better trade mini-games** overall (e.g. welding line-follow instead of a plain timing tap).
-  These change the "4 roles at launch" scope in PLAN.md: confirm order/scope with the owner before starting.
+- **Welder + HVAC trades, better mini-games, tool shop (owner request 2026-11-13: "build the welding trade, a tool shop,
+  and all the beter mini games and the hvac"). Scope change: 6 trades now, not the 4 launch roles in PLAN.md.**
+  * Two new task kinds in the one task engine (bots use them too):
+    - **Trace** (`TaskEngine/Trace`, client `TaskControllers/Trace`): weld a seam on a steel plate with one finger /
+      the mouse, from the green START to the red END. Seam from `Shared/Util/TracePath` (zig-zag, steps or curve). The
+      client sends its samples (flat x, y, t; max 280) through `TraceSubmit`; the server judges: start near START, no
+      skipping > 25%, reach 92%, < 20% of samples more than 2 tol off, no jumps > 4.4 panel widths/s, not faster than
+      the seam allows, not claiming more time than has passed. Accuracy = 1 - 0.5 x mean distance / tol (0.45..1).
+      A bad weld = a miss with the reason on screen and a new seam.
+    - **Gauge** (`TaskEngine/Gauge`, client `TaskControllers/Gauge`, math in `Shared/Util/Gauge`): HOLD to raise the
+      needle, let go and it falls; keep it in the green until the bar fills. The client only sends held / let go
+      (`GaugeHold`, 30 per second budget); the server replays the times with its own clock (latency capped at 0.2 s).
+      Styles: Pour (concrete form filling), Level (bubble; eased 2026-11-13 to rise 0.55 / fall 0.4 / band 0.16 after
+      a simulated 0.18 s-reaction player only scored 0.53), Charge (refrigerant pressure), Voltage. Accuracy drops
+      when you slip out after getting in (0.5..1); out of time = a miss and a new round. Hold key: Space / gamepad A
+      (`Input.BindHold`).
+    - Timing `Hits`: nailing is 3 taps in a row ("Nail wall 2/3"), the green shrinks a bit each hit.
+  * Blueprints: pours -> Gauge Pour, level check -> Gauge Level, Power on -> Gauge Voltage, nails -> 3 hits.
+    **Welder** (Max 2, orange): House = plates on the 4 corner piers (before the level check), 2 brackets per roof
+    section, 2 stair rails at the end; Shed = 2 door hinges + a roof bracket. **HVAC** (Max 2, teal): per floor 2 ducts
+    (Place "Duct") -> route the ductwork (Connect) -> 2 floor vents (Place "Vent"); after the roof + vents: AC unit
+    (Place "ACUnit", DetailService dresses it: fan grille, fins, pad) -> Charge refrigerant (Gauge Charge,
+    `NotStructural`, so inspection never collapses it). HVAC piles stand behind the house (Duct / Vent / ACUnit).
+    The Shed has no HVAC work. Bots: Trace 4-8 s at 0.66-0.95, Gauge need + 2-4.5 s at 0.7-0.96, Timing averages
+    its hits. The trade picker is now a 2 x 3 grid (buttons 263 x 93 on a desktop window).
+  * **Tool shop** (`Workspace.ToolShop`, built by `ServerStorage/DevTools/ToolShopBuilder`, south side of Main St at
+    x 240, z -468, facing the road; counter at (240, 2.3, -472)). "Browse tools" at the counter -> `ToolShopController`
+    panel (BUY $X / OWNED, closes past 24 studs). `ToolShopService` checks every buy: a real catalog id, at the counter
+    (20 studs), not owned, `EconomyService.TrySpend`, then `DataService.GrantTool` + save; 0.4 s rate limit. Catalog
+    (authoritative) `ServerStorage/Config/Tools`: Pro Framing Hammer $1,200 (timing x1.2), Laser Level $1,500
+    (gauge:Level x1.35), Concrete Vibrator $1,500 (gauge:Pour x1.35), Auto-Dark Welding Helmet $1,800 (trace x1.3),
+    Digital Manifold Gauges $1,800 (gauge:Charge x1.35), Insulated Lineman's Pliers $1,400 (connect x1.5,
+    gauge:Voltage x1.25), Precision Joysticks $2,200 (machine controls x1.3). Tools only widen the green / give more
+    room or time; they never do the work (monetization rule). `TaskEngine.SetBonus(fn(p, what))` is the hook.
+  * Profile v5: XP for Welder and HVAC, `Tools` = { [id] = true } (player attribute `Tools` = comma list).
+  * Playtested 2026-11-13: shop (refused at $0, bought 2 tools, refused re-buy / junk ids / spam / away from the
+    counter, panel closes when walking off; Economy log matches); Shed as a human Laborer (4 Gauge pours ~4.2 s each
+    with the Vibrator's 0.189 band, 3-hit nails, Welder bot did the hinges + bracket; A, $896); Starter House as a human
+    Welder (8 traces, 2.9-4.2 s each, helmet tol 0.0715; HVAC bot did ducts, route, vents, AC unit, charge; surprise
+    inspector flags fixed; A, $2,677 with 435 s left); Trace judge against good / shaky / too fast / half / backwards /
+    jump / time-travel recordings; every Gauge style finishable in time; 120 GaugeHold spam + junk TraceSubmit / Shop
+    args gave no errors. Not tested: a human Level / Voltage / Charge run (same code path as Pour), the Trace and
+    Gauge panels on a real phone, the Joysticks bonus in a hand lift, HVAC on a Two-Story (2 floors). Screenshots timed
+    out this session, so the shop and new panels haven't been looked at on screen yet.
 
 ## Studio workflow notes (learned the hard way)
 - Seats auto-seat whoever touches them. Any seat with a trade rule must also check `Occupant` on the server and eject.

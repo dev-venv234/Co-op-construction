@@ -13,6 +13,7 @@ local ServerStorage = game:GetService("ServerStorage")
 
 local Net = require(ReplicatedStorage.Shared.Util.Net)
 local Trades = require(ReplicatedStorage.Shared.Config.Trades)
+local GaugeStyles = require(ReplicatedStorage.Shared.Util.Gauge).STYLES
 
 local BotService = {}
 
@@ -452,7 +453,7 @@ local function workOn(b: Bot, slot: any): boolean
 		end
 		walkTo(b, standFor(b, slot), 4)
 		return S.JobService.BotPlace(b.model, b.role, slot)
-	elseif def.Kind == "Timing" or def.Kind == "Connect" or def.Kind == "Inspect" then
+	elseif def.Kind == "Timing" or def.Kind == "Connect" or def.Kind == "Inspect" or def.Kind == "Trace" or def.Kind == "Gauge" then
 		if def.Equipment then
 			return runMachine(b, def.Equipment, slot)
 		end
@@ -463,7 +464,22 @@ local function workOn(b: Bot, slot: any): boolean
 		end
 		local acc = 1
 		if def.Kind == "Timing" then
-			acc = simulateTiming()
+			-- several hits in a row (nailing): each one judged like a player's tap
+			local n = math.max(1, def.Hits or 1)
+			local sum = 0
+			for _ = 1, n do
+				sum += simulateTiming()
+			end
+			acc = sum / n
+		elseif def.Kind == "Trace" then
+			-- a bot's weld: slow and a little wobbly
+			task.wait(rng:NextNumber(4, 8))
+			acc = rng:NextNumber(0.66, 0.95)
+		elseif def.Kind == "Gauge" then
+			-- a bot holding the needle in the green: a few seconds, sometimes slipping out
+			local st = GaugeStyles[def.Style or "Pour"]
+			task.wait((if st then st.need else 2) + rng:NextNumber(2, 4.5))
+			acc = rng:NextNumber(0.7, 0.96)
 		elseif def.Kind == "Connect" then
 			local seconds = rng:NextNumber(8, 18) -- bots are slow at the wiring puzzle
 			task.wait(seconds)

@@ -120,7 +120,9 @@ end
 
 local function show(d: { [string]: any })
 	current = d
-	title.Text = tostring(d.label) .. (if d.missed then "  - missed, again!" else "")
+	-- several hits in a row (nailing): "Nail wall  2/3"
+	local count = if typeof(d.hits) == "number" and d.hits > 1 then ("  %d/%d"):format(d.hit or 1, d.hits) else ""
+	title.Text = tostring(d.label) .. count .. (if d.missed then "  - missed, again!" else "")
 	title.TextColor3 = if d.missed then Color3.fromRGB(255, 140, 120) else Color3.new(1, 1, 1)
 	zone.Position = UDim2.fromScale(d.zMin, 0)
 	zone.Size = UDim2.fromScale(d.zMax - d.zMin, 1)

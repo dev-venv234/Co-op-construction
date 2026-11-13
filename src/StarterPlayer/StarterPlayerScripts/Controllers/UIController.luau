@@ -146,7 +146,10 @@ local function buildPicker()
 		BackgroundTransparency = 1,
 		ZIndex = 21,
 		Parent = picker,
-	}, { new("UIListLayout", { Padding = UDim.new(0.03, 0), SortOrder = Enum.SortOrder.LayoutOrder }) })
+	}, {
+		-- 6 trades: two columns of three, so every button stays well over 44 px tall on a phone
+		new("UIGridLayout", { CellSize = UDim2.new(0.5, -5, 1 / 3, -6), CellPadding = UDim2.fromOffset(10, 8), SortOrder = Enum.SortOrder.LayoutOrder }),
+	})
 
 	for i, id in Trades.Order do
 		local info = Trades.Info[id]

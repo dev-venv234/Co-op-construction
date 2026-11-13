@@ -35,8 +35,8 @@ end
 -- Only built pieces can fall: not checks and switches (level check, power on) or wiring (Connect).
 local NOT_STRUCTURAL = { level = true, power = true }
 local function structural(def: any): boolean
-	return not NOT_STRUCTURAL[def.Id] and def.Kind ~= "Connect" and def.Kind ~= "Inspect" and def.Kind ~= "Deliver"
-		and not def.Equipment
+	return not NOT_STRUCTURAL[def.Id] and not def.NotStructural and def.Kind ~= "Connect" and def.Kind ~= "Inspect"
+		and def.Kind ~= "Deliver" and not def.Equipment
 end
 
 -- Weak work only counts when a player built it: bots are the crew's stand-ins, and their misses already

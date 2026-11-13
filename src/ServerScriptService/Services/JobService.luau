@@ -233,7 +233,7 @@ local function complete(cur: Current, slot: any, p: Instance, accuracy: number)
 	end
 	-- Sound cue for the crew: nails and finishing work hammer, pieces thud into place, electrical work sparks.
 	local def = slot.def
-	local cue = if def.Kind == "Connect" or def.Role == "Electrician" then "Spark"
+	local cue = if def.Kind == "Connect" or def.Kind == "Trace" or def.Role == "Electrician" then "Spark"
 		elseif def.Kind == "Place" or def.Kind == "Deliver" or def.Equipment == "Crane" then "Place"
 		elseif def.Kind == "Timing" and not def.Equipment then "Hammer"
 		else nil
@@ -473,7 +473,17 @@ local function onSlot(cur: Current, p: Player, slot: any)
 			else "Dig: lower the arm into the glowing hole and lift it out, 3 times")
 	elseif def.Kind == "Timing" then
 		slot.busyBy = p
-		if not S.TaskEngine.BeginTiming(p, slot.part, def.Label, done, cancelled) then
+		if not S.TaskEngine.BeginTiming(p, slot.part, def.Label, done, cancelled, def.Hits) then
+			slot.busyBy = nil
+		end
+	elseif def.Kind == "Trace" then
+		slot.busyBy = p
+		if not S.TaskEngine.BeginTrace(p, slot.part, def.Label, done, cancelled) then
+			slot.busyBy = nil
+		end
+	elseif def.Kind == "Gauge" then
+		slot.busyBy = p
+		if not S.TaskEngine.BeginGauge(p, slot.part, def.Label, def.Style or "Pour", done, cancelled) then
 			slot.busyBy = nil
 		end
 	elseif def.Kind == "Connect" then

@@ -228,7 +228,9 @@ local function objective(): (string, ProximityPrompt?)
 			who, task.ActionText), task
 	end
 	local after = if kind == "Timing" then ", then tap TAP when the needle is in the green"
-		elseif kind == "Connect" then ", then turn the tiles to connect the wire"
+		elseif kind == "Connect" then ", then turn the tiles to connect it up"
+		elseif kind == "Trace" then ", then trace the seam from the green START to the red END"
+		elseif kind == "Gauge" then ", then HOLD to bring the needle into the green and keep it there"
 		else ""
 	return ("%sGo to the glowing outline and tap %s%s"):format(who, task.ActionText, after), task
 end
