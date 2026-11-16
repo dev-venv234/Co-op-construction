@@ -24,12 +24,17 @@ type Bot = {
 	role: string,
 	alive: boolean,
 	seat: BasePart?,
+	pro: boolean?, -- hired through the store (Hire a Pro): faster and more accurate, for this job only
 }
 
 local SPEED_SCALE = 0.75 -- bots walk at 75% of player speed
 local AIM_SPREAD = 0.3 -- seconds of tap error (roughly 1 miss in 12 taps)
 local THINK_MIN, THINK_MAX = 0.8, 1.8 -- pause between tasks
 local START_GRACE = 8 -- seconds after a job starts before bots join (time to pick a trade)
+-- A hired pro (paid boost): player walking speed, short pauses, a steadier hand. Still one worker on one trade,
+-- going through the same slot rules and task engine as everyone else.
+local PRO_AIM_SPREAD = 0.1
+local PRO_MACHINE_AIM = 0.6
 local SKINS = {
 	Color3.fromRGB(234, 184, 146), Color3.fromRGB(198, 140, 100), Color3.fromRGB(141, 85, 54),
 	Color3.fromRGB(255, 205, 170), Color3.fromRGB(110, 70, 45),
@@ -38,6 +43,7 @@ local SKINS = {
 local S: any
 local bots: { Bot } = {}
 local rng = Random.new()
+local proRole: { [string]: boolean } = {} -- trades with a hired pro on this job
 local folder: Folder
 
 function BotService.Init(services)
@@ -322,14 +328,14 @@ end
 ---------------------------------------------------------------------------------------------------------------
 
 -- A bot's tap on the Timing needle: aims for the zone center with some error, judged by the task engine.
-local function simulateTiming(): number
+local function simulateTiming(pro: boolean?): number
 	local TT = S.TaskEngine.TimingTask
 	local cap = 1
 	for _ = 1, 6 do
 		local r = TT.NewRound()
 		local aim = r.center * r.period -- the needle first reaches the zone center at this time
-		local noise = (rng:NextNumber() + rng:NextNumber() - 1) * AIM_SPREAD
-		task.wait(0.35 + math.max(0, aim + noise) + rng:NextNumber(0.2, 0.8))
+		local noise = (rng:NextNumber() + rng:NextNumber() - 1) * (if pro then PRO_AIM_SPREAD else AIM_SPREAD)
+		task.wait(0.35 + math.max(0, aim + noise) + (if pro then rng:NextNumber(0.1, 0.3) else rng:NextNumber(0.2, 0.8)))
 		local hit, acc = TT.JudgeAt(r, aim + noise)
 		if hit then
 			return math.min(acc, cap)
@@ -415,7 +421,7 @@ local function runMachine(b: Bot, kind: string, slot: any): boolean
 	end
 	local finished = S.EquipmentService.Autopilot(rig, function()
 		return b.alive
-	end, MACHINE_AIM)
+	end, if b.pro then PRO_MACHINE_AIM else MACHINE_AIM)
 	if not finished then
 		S.JobService.BotAbort(b.model, slot, rig)
 		return false
@@ -468,20 +474,21 @@ local function workOn(b: Bot, slot: any): boolean
 			local n = math.max(1, def.Hits or 1)
 			local sum = 0
 			for _ = 1, n do
-				sum += simulateTiming()
+				sum += simulateTiming(b.pro)
 			end
 			acc = sum / n
 		elseif def.Kind == "Trace" then
-			-- a bot's weld: slow and a little wobbly
-			task.wait(rng:NextNumber(4, 8))
-			acc = rng:NextNumber(0.66, 0.95)
+			-- a bot's weld: slow and a little wobbly (a pro: quicker and steady)
+			task.wait(if b.pro then rng:NextNumber(2.5, 4) else rng:NextNumber(4, 8))
+			acc = if b.pro then rng:NextNumber(0.9, 1) else rng:NextNumber(0.66, 0.95)
 		elseif def.Kind == "Gauge" then
 			-- a bot holding the needle in the green: a few seconds, sometimes slipping out
 			local st = GaugeStyles[def.Style or "Pour"]
-			task.wait((if st then st.need else 2) + rng:NextNumber(2, 4.5))
-			acc = rng:NextNumber(0.7, 0.96)
+			task.wait((if st then st.need else 2) + (if b.pro then rng:NextNumber(0.8, 1.6) else rng:NextNumber(2, 4.5)))
+			acc = if b.pro then rng:NextNumber(0.92, 1) else rng:NextNumber(0.7, 0.96)
 		elseif def.Kind == "Connect" then
-			local seconds = rng:NextNumber(8, 18) -- bots are slow at the wiring puzzle
+			-- bots are slow at the wiring puzzle (a pro less so)
+			local seconds = if b.pro then rng:NextNumber(4, 7) else rng:NextNumber(8, 18)
 			task.wait(seconds)
 			acc = S.TaskEngine.ConnectTask.Accuracy(seconds)
 		else
@@ -528,13 +535,39 @@ local function brain(b: Bot)
 				break
 			end
 		end
-		task.wait(if did then rng:NextNumber(THINK_MIN, THINK_MAX) else 1.5)
+		task.wait(if not did then 1.5 elseif b.pro then rng:NextNumber(0.3, 0.6) else rng:NextNumber(THINK_MIN, THINK_MAX))
 	end
 end
 
 ---------------------------------------------------------------------------------------------------------------
 -- Crew management
 ---------------------------------------------------------------------------------------------------------------
+
+-- Turns a bot into the hired pro for its trade.
+local function makePro(b: Bot)
+	b.pro = true
+	b.model:SetAttribute("Pro", true)
+	b.model:SetAttribute("SpeedScale", 1)
+	b.hum.WalkSpeed = 16
+	b.model.Name = "Pro " .. b.role
+	b.hum.DisplayName = b.role .. " (PRO)"
+	-- a gold hard hat, so the crew can spot the pro
+	for _, acc in b.model:GetChildren() do
+		local handle = if acc:IsA("Accessory") and acc.Name == "HardHat" then acc:FindFirstChild("Handle") else nil
+		if handle and handle:IsA("BasePart") then
+			handle.Color = Color3.fromRGB(255, 200, 40)
+		end
+	end
+end
+
+local function hasPro(role: string): boolean
+	for _, b in bots do
+		if b.alive and b.pro and b.role == role then
+			return true
+		end
+	end
+	return false
+end
 
 local function wanted(): { [string]: number }
 	local out: { [string]: number } = {}
@@ -548,6 +581,10 @@ local function wanted(): { [string]: number }
 			out[role] = if role == "Laborer" and cur.tier >= 3 then 2 else 1
 		end
 	end
+	-- a hired pro stays for the whole job, even if a player picks that trade later (it was paid for)
+	for role in proRole do
+		out[role] = math.max(out[role] or 0, 1)
+	end
 	return out
 end
 
@@ -559,13 +596,16 @@ local function reconcile()
 	end
 	local Toast = Net.Event("Toast")
 	local changed = false
-	for i = #bots, 1, -1 do
-		local b = bots[i]
-		if (want[b.role] or 0) < (have[b.role] or 0) then
-			have[b.role] -= 1
-			Toast:FireAllClients(b.role .. " bot clocked out: a player took the job")
-			despawn(b)
-			changed = true
+	-- regular bots clock out before a pro does
+	for pass = 1, 2 do
+		for i = #bots, 1, -1 do
+			local b = bots[i]
+			if (b.pro == true) == (pass == 2) and (want[b.role] or 0) < (have[b.role] or 0) then
+				have[b.role] -= 1
+				Toast:FireAllClients(b.role .. " bot clocked out: a player took the job")
+				despawn(b)
+				changed = true
+			end
 		end
 	end
 	local spawnCF = S.JobService.SiteSpawn()
@@ -574,9 +614,14 @@ local function reconcile()
 			for _ = (have[role] or 0) + 1, n do
 				local b = spawnBot(role, spawnCF * CFrame.new(rng:NextNumber(-6, 6), 0, rng:NextNumber(-4, 4)))
 				if b then
+					local asPro = proRole[role] == true and not hasPro(role)
+					if asPro then
+						makePro(b)
+					end
 					table.insert(bots, b)
 					task.spawn(brain, b)
-					Toast:FireAllClients(role .. " bot joined the crew (it fills the empty trade)")
+					Toast:FireAllClients(if asPro then "The pro " .. role .. " is on site"
+						else role .. " bot joined the crew (it fills the empty trade)")
 					changed = true
 				end
 			end
@@ -591,6 +636,71 @@ local function clearAll()
 	for i = #bots, 1, -1 do
 		despawn(bots[i])
 	end
+	table.clear(proRole) -- a pro is hired for one job
+end
+
+---------------------------------------------------------------------------------------------------------------
+-- Hire a Pro (a paid boost, PurchaseService): a skilled bot takes an empty trade for the rest of this job.
+---------------------------------------------------------------------------------------------------------------
+
+-- The empty trade (no player on it, no pro yet) with the most unfinished work on this job.
+local function proCandidate(): string?
+	local cur = S.JobService.Current()
+	if not cur or cur.finishing or cur.inspecting then
+		return nil
+	end
+	local left: { [string]: number } = {}
+	for _, slot in cur.slots do
+		if not slot.done then
+			left[slot.def.Role] = (left[slot.def.Role] or 0) + 1
+		end
+	end
+	local best: string?, bestN = nil, 0
+	for _, role in Trades.Order do
+		if not proRole[role] and not S.CrewService.IsRoleHeld(role) and (left[role] or 0) > bestN then
+			best, bestN = role, left[role]
+		end
+	end
+	return best
+end
+
+function BotService.CanHirePro(): (boolean, string?)
+	local cur = S.JobService.Current()
+	if not cur or cur.finishing then
+		return false, "Start a job first: a pro is hired for one job"
+	end
+	if cur.inspecting then
+		return false, "The job is at final inspection: there's no work left for a pro"
+	end
+	if not proCandidate() then
+		return false, "No empty trade with work left: a pro takes a trade no player is on"
+	end
+	return true, nil
+end
+
+-- Never yields. The pro replaces the regular bot on that trade (or joins now if the bots aren't on site yet).
+function BotService.HirePro(buyer: Player): (boolean, string?)
+	local ok, why = BotService.CanHirePro()
+	local role = proCandidate()
+	if not ok or not role then
+		return false, why
+	end
+	proRole[role] = true
+	local upgraded = false
+	for _, b in bots do
+		if b.alive and b.role == role and not b.pro then
+			makePro(b)
+			upgraded = true
+			break
+		end
+	end
+	Net.Event("Toast"):FireAllClients(("%s HIRED A PRO %s for this job!"):format(buyer.Name, string.upper(role)))
+	if upgraded then
+		S.JobService.Broadcast()
+	else
+		task.defer(reconcile) -- no bot on that trade yet: bring the pro in
+	end
+	return true, nil
 end
 
 function BotService.Start()

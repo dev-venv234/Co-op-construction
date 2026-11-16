@@ -410,6 +410,15 @@ function Purchase.Start()
 		end,
 	}
 
+	boosts.HirePro = {
+		can = function(_p: Player)
+			return S.BotService.CanHirePro()
+		end,
+		apply = function(p: Player)
+			return S.BotService.HirePro(p)
+		end,
+	}
+
 	-- The one receipt handler.
 	MarketplaceService.ProcessReceipt = function(info)
 		local ok, decision = pcall(processReceipt, info, nil)
