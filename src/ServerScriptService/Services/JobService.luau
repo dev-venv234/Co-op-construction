@@ -400,6 +400,47 @@ local function doDeliver(cur: Current, slot: any, actor: Instance): (boolean, st
 	return true, nil
 end
 
+-- Rush Delivery (a paid boost for the whole crew, PurchaseService): the supplier trucks whatever is still missing
+-- straight to the site. It only skips the hauling: every piece still has to be built by the crew. Can it be used now?
+function Job.CanRush(): (boolean, string?)
+	local cur = current
+	if not cur or cur.finishing then
+		return false, "Start a job first: Rush Delivery brings that job's materials to the site"
+	end
+	local deliver = cur.slots.deliver
+	if not deliver or deliver.done then
+		return false, "This job's materials are already at the site"
+	end
+	return true, nil
+end
+
+-- Does the same bookkeeping as unloading the last trip (doDeliver): piles for what wasn't on site yet, the truck
+-- emptied, the Deliver slot completed in the buyer's name. Never yields.
+function Job.RushDelivery(buyer: Player): (boolean, string?)
+	local ok, why = Job.CanRush()
+	local cur = current
+	if not ok or not cur then
+		return false, why
+	end
+	local slot = cur.slots.deliver
+	if cur.truck then
+		S.VehicleService.UnloadAll(cur.truck) -- what's on the truck counts as delivered too
+	end
+	local k = 0
+	for item, n in cur.cfg.Load do
+		local before = cur.delivered[item] or 0
+		cur.delivered[item] = n
+		if before == 0 then
+			k += 1
+			addPile(cur, item, deliveredPilePos(cur, item, slot.def, k))
+		end
+	end
+	Toast:FireAllClients(("RUSH DELIVERY! %s had the materials trucked straight to Site %d. Grab them from the piles"):format(
+		buyer.Name, cur.tier))
+	complete(cur, slot, buyer, 1)
+	return true, nil
+end
+
 local function onSlot(cur: Current, p: Player, slot: any)
 	if current ~= cur or cur.finishing or slot.done then
 		return
@@ -596,12 +637,17 @@ local function loadBundles(cur: Current, p: Player?, item: string, stack: BasePa
 	loadingNow = true
 	task.spawn(function()
 		local loaded = 0
+		-- stops when the job ends or its materials are all on site (Rush Delivery can do that mid-flight)
+		local function stillNeeded(): boolean
+			return current == cur and not cur.finishing and truck.model.Parent ~= nil
+				and not (cur.slots.deliver and cur.slots.deliver.done)
+		end
 		for _ = 1, n do
-			if current ~= cur or cur.finishing or not truck.model.Parent then
+			if not stillNeeded() then
 				break
 			end
 			flyBundle(stack, bed, def)
-			if current == cur and S.VehicleService.AddCargo(truck, item, def) then
+			if stillNeeded() and S.VehicleService.AddCargo(truck, item, def) then
 				loaded += 1
 				Net.Cue("Place", bed.Position)
 				if p and p.Parent then
@@ -611,7 +657,7 @@ local function loadBundles(cur: Current, p: Player?, item: string, stack: BasePa
 			end
 		end
 		loadingNow = false
-		if current ~= cur or loaded == 0 then
+		if not stillNeeded() or loaded == 0 then
 			return
 		end
 		local have, total = loadProgress(cur)

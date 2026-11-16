@@ -400,6 +400,16 @@ function Purchase.Start()
 		warn("[Purchase] not on sale yet (no id in ServerStorage.Config.Products): " .. table.concat(placeholders, ", "))
 	end
 
+	-- Boosts: each one works through the service that owns that part of the game.
+	boosts.RushDelivery = {
+		can = function(_p: Player)
+			return S.JobService.CanRush()
+		end,
+		apply = function(p: Player)
+			return S.JobService.RushDelivery(p)
+		end,
+	}
+
 	-- The one receipt handler.
 	MarketplaceService.ProcessReceipt = function(info)
 		local ok, decision = pcall(processReceipt, info, nil)
