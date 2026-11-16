@@ -351,6 +351,9 @@ local function onBuy(p: Player, key: string)
 		end
 		wants[p] = wants[p] or {}
 		wants[p][key] = os.clock()
+		if key == "RetryInspection" then
+			S.InspectionService.HoldRetry() -- the offer waits (once) while this player is in the purchase prompt
+		end
 		prompt(p, key)
 	elseif it.Type == "Pass" then
 		if passOwned[p] then
@@ -418,6 +421,22 @@ function Purchase.Start()
 			return S.BotService.HirePro(p)
 		end,
 	}
+
+	boosts.RetryInspection = {
+		can = function(_p: Player)
+			return S.InspectionService.CanRetry()
+		end,
+		apply = function(p: Player)
+			return S.InspectionService.TakeRetry(p)
+		end,
+	}
+	-- A retry prompt that closed without a purchase stops holding the offer open. (Only a hint for the timer: the
+	-- purchase itself is only ever granted by the receipt.)
+	MarketplaceService.PromptProductPurchaseFinished:Connect(function(_userId: number, productId: number, purchased: boolean)
+		if not purchased and productId == Items.RetryInspection.Id and productId > 0 then
+			S.InspectionService.ReleaseRetry()
+		end
+	end)
 
 	-- The one receipt handler.
 	MarketplaceService.ProcessReceipt = function(info)

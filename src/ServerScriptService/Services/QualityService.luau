@@ -24,10 +24,10 @@ function Quality.Average(): number
 	return sum / #records
 end
 
--- Chaos: rework records (loading, re-stacking, fixes, mishaps) are never flagged by the inspector.
+-- Chaos: rework records (loading, re-stacking, fixes, retry rebuilds, mishaps) are never flagged by the inspector.
 local function isRework(id: string): boolean
 	return string.sub(id, 1, 5) == "load_" or string.sub(id, 1, 8) == "restack_" or string.sub(id, 1, 4) == "fix_"
-		or string.sub(id, -7) == "_mishap"
+		or string.sub(id, 1, 4) == "redo" or string.sub(id, -7) == "_mishap"
 end
 
 -- The worst build tasks under `threshold` accuracy, lowest first (at most `limit`).

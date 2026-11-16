@@ -43,6 +43,7 @@ type Current = {
 	deadlineAt: number,
 	finishing: boolean,
 	inspecting: boolean?,
+	phaseNote: string?, -- shown as the phase instead of "Final inspection" (Retry Inspection: rebuilding)
 }
 local current: Current? = nil
 
@@ -174,7 +175,8 @@ local function snapshot(): { [string]: any }
 		s.deadlineAt = cur.deadlineAt
 		s.done = done
 		s.total = total
-		s.phase = if cur.finishing then "Finished" elseif cur.inspecting then "Final inspection" else phase
+		s.phase = if cur.finishing then "Finished" elseif cur.phaseNote then cur.phaseNote
+			elseif cur.inspecting then "Final inspection" else phase
 	end
 	s.bots = if S.BotService then S.BotService.Summary() else {}
 	return s
@@ -285,6 +287,33 @@ function Job.AddSlot(def: any, cf: CFrame, cleanup: Instance?, onDone: ((Instanc
 	refresh(cur)
 	Job.Broadcast()
 	return slot
+end
+
+-- Closes a rework slot nobody finished (its time ran out): no credit, no quality record.
+function Job.DropSlot(id: string)
+	local cur = current
+	local slot = cur and cur.slots[id]
+	if not cur or not slot or slot.done then
+		return
+	end
+	slot.done = true -- a task still running on it ends in nothing (complete() ignores done slots)
+	slot.busyBy = nil
+	slot.prompt:Destroy()
+	slot.part:Destroy()
+	cur.slots[id] = nil
+	local i = table.find(cur.order, id)
+	if i then
+		table.remove(cur.order, i)
+	end
+	Job.Broadcast()
+end
+
+-- What the HUD shows as the phase while the job is at inspection (nil = the normal text).
+function Job.SetPhaseNote(cur: Current, note: string?)
+	if current == cur then
+		cur.phaseNote = note
+		Job.Broadcast()
+	end
 end
 
 -- Crane mishap: the lift failed, the load lies on the ground. A Laborer re-stacks it before the lift can go again.
