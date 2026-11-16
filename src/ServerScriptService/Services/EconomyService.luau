@@ -29,13 +29,33 @@ function Economy.Start()
 	end
 end
 
-function Economy.AddCash(p: Player, amount: number, reason: string)
+-- Returns false when the player has no cash value yet (nothing was added).
+function Economy.AddCash(p: Player, amount: number, reason: string): boolean
 	assert(amount >= 0 and amount == math.floor(amount), "bad amount")
 	local c = cashValue(p)
-	if c then
-		c.Value += amount
-		print(("[Economy] +$%d to %s (%s)"):format(amount, p.Name, reason))
+	if not c then
+		return false
 	end
+	c.Value += amount
+	print(("[Economy] +$%d to %s (%s)"):format(amount, p.Name, reason))
+	return true
+end
+
+-- Pay multiplier for one player's paycheck (the 2x Pay game pass). PurchaseService registers the check; the payout
+-- (JobService.finish) asks per player. Anything but exactly 2 counts as 1, so a bad provider can never inflate pay.
+local payBoost: ((Player) -> number)? = nil
+function Economy.SetPayBoost(fn: (Player) -> number)
+	payBoost = fn
+end
+
+function Economy.PayBoost(p: Player): number
+	if payBoost then
+		local ok, m = pcall(payBoost, p)
+		if ok and m == 2 then
+			return 2
+		end
+	end
+	return 1
 end
 
 -- Takes `amount` (from server config, never from a client) if the player has it. Returns false otherwise.

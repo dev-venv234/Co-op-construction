@@ -2,6 +2,8 @@
 -- Player profiles in a DataStore. When someone joins, everything they had comes back:
 --   Cash, trade XP (all 6 trades), FirstPayout (unlocks the RV start), LastTrade (re-picked automatically),
 --   Tools bought at the tool shop (v5, 2026-11-13: also the Welder and HVAC trades),
+--   Receipts (v6, 2026-11-16): the Robux purchases already granted (PurchaseService dedupes on them), Credits (paid
+--   boosts not used yet) and RobuxSpent,
 --   Stats (jobs done, total earned, best grade), owned Vehicles, the Truck the player takes on jobs, and their
 --   Settings (volumes, graphics, controls: saved through the validated SaveSettings remote, shown to the client as the
 --   "Settings" attribute).
@@ -20,7 +22,8 @@ local Data = {}
 Data.Loaded = Instance.new("BindableEvent") -- (player)
 
 local STORE_NAME = "CoopProfiles_v1"
-local VERSION = 5
+local VERSION = 6
+local MAX_RECEIPTS = 150 -- newest purchase ids kept for the duplicate check
 local LOCK_SECONDS = 300
 local AUTOSAVE_SECONDS = 120
 local GRADE_RANK = { ["A+"] = 5, A = 4, B = 3, C = 2, D = 1 }
@@ -36,6 +39,9 @@ local function default(): { [string]: any }
 		FirstPayout = false,
 		XP = { Foreman = 0, Laborer = 0, Operator = 0, Electrician = 0, Welder = 0, HVAC = 0 },
 		Tools = {}, -- tool shop: [toolId] = true (ToolShopService)
+		Receipts = {}, -- [PurchaseId] = os.time() when it was granted (PurchaseService: never grant one twice)
+		Credits = { RushDelivery = 0, HirePro = 0, RetryInspection = 0 }, -- paid boosts waiting to be used
+		RobuxSpent = 0,
 		LastTrade = "",
 		Stats = { JobsDone = 0, TotalEarned = 0, BestGrade = "" },
 		Vehicles = { StarterTruck = true },
@@ -103,6 +109,17 @@ local function publishTools(p: Player, prof: any)
 	end
 	table.sort(list)
 	p:SetAttribute("Tools", table.concat(list, ","))
+end
+
+-- Unused paid boosts for the client's store panel ("USE (1)"), as JSON.
+local function publishCredits(p: Player, prof: any)
+	local out = {}
+	for k, n in prof.Credits or {} do
+		if type(n) == "number" and n > 0 then
+			out[k] = n
+		end
+	end
+	p:SetAttribute("Credits", HttpService:JSONEncode(out))
 end
 
 local function publishTrucks(p: Player, prof: any)
@@ -185,35 +202,117 @@ local function load(p: Player)
 	p:SetAttribute("JobsDone", data.Stats.JobsDone)
 	publishTrucks(p, data)
 	publishTools(p, data)
+	publishCredits(p, data)
 	p:SetAttribute("Settings", HttpService:JSONEncode(data.Settings))
 	Data.Loaded:Fire(p)
 end
 
-function Data.Save(p: Player, release: boolean?)
+-- Can this player's profile be written to the DataStore right now (store up, session lock held)?
+function Data.CanPersist(p: Player): boolean
+	return store ~= nil and canSave[p] == true and profiles[p] ~= nil
+end
+
+-- Returns true only when the profile was written to the DataStore under this server's session lock. Otherwise
+-- false and why: "memory" (no DataStore at all: Studio with API access off), "no profile", "no session lock",
+-- "session lock lost" (another server owns the profile now) or "datastore error".
+-- PurchaseService relies on this: a purchase is only confirmed to Roblox after a true.
+function Data.Save(p: Player, release: boolean?): (boolean, string?)
 	local prof = profiles[p]
 	if not prof then
-		return
+		return false, "no profile"
 	end
 	local cash = cashValue(p)
 	if cash then
 		prof.Cash = cash.Value
 	end
-	if not store or not canSave[p] then
-		return
+	if not store then
+		return false, "memory"
+	end
+	if not canSave[p] then
+		return false, "no session lock"
 	end
 	local snapshot = deepCopy(prof)
+	local wrote = false
 	local ok, err = pcall(function()
 		(store :: DataStore):UpdateAsync(key(p), function(old)
 			if old and old.Lock and old.Lock.Job ~= game.JobId then
+				wrote = false
 				return nil -- someone else owns it now; don't overwrite
 			end
 			snapshot.Lock = if release then nil else { Job = game.JobId, Time = os.time() }
+			wrote = true
 			return snapshot
 		end)
 	end)
 	if not ok then
 		warn("[Data] save failed for", p.Name, err)
+		return false, "datastore error"
 	end
+	if not wrote then
+		warn("[Data] save skipped for", p.Name, "- another server holds the profile")
+		return false, "session lock lost"
+	end
+	return true, nil
+end
+
+---------------------------------------------------------------------------------------------------------------
+-- Robux purchases (PurchaseService). The receipt id and what it gave live in the same profile, so one save
+-- writes both: a purchase is either fully recorded or not at all.
+---------------------------------------------------------------------------------------------------------------
+
+function Data.HasReceipt(p: Player, purchaseId: string): boolean
+	local prof = profiles[p]
+	return prof ~= nil and type(prof.Receipts) == "table" and prof.Receipts[purchaseId] ~= nil
+end
+
+-- Records a granted purchase. Keeps the newest MAX_RECEIPTS ids (Roblox only re-sends unresolved ones).
+function Data.AddReceipt(p: Player, purchaseId: string, robux: number)
+	local prof = profiles[p]
+	if not prof then
+		return
+	end
+	prof.Receipts = if type(prof.Receipts) == "table" then prof.Receipts else {}
+	prof.Receipts[purchaseId] = os.time()
+	prof.RobuxSpent = (tonumber(prof.RobuxSpent) or 0) + math.max(0, math.floor(robux))
+	local ids = {}
+	for id, t in prof.Receipts do
+		table.insert(ids, { id = id, t = tonumber(t) or 0 })
+	end
+	if #ids > MAX_RECEIPTS then
+		table.sort(ids, function(a, b)
+			return a.t > b.t
+		end)
+		for i = MAX_RECEIPTS + 1, #ids do
+			prof.Receipts[ids[i].id] = nil
+		end
+	end
+end
+
+function Data.Credits(p: Player, kind: string): number
+	local prof = profiles[p]
+	local n = prof and type(prof.Credits) == "table" and prof.Credits[kind]
+	return if type(n) == "number" and n > 0 then math.floor(n) else 0
+end
+
+function Data.AddCredit(p: Player, kind: string, n: number)
+	local prof = profiles[p]
+	if prof and n > 0 then
+		prof.Credits = if type(prof.Credits) == "table" then prof.Credits else {}
+		prof.Credits[kind] = Data.Credits(p, kind) + math.floor(n)
+		publishCredits(p, prof)
+	end
+end
+
+-- Takes one credit. False when the player has none.
+function Data.TakeCredit(p: Player, kind: string): boolean
+	local prof = profiles[p]
+	local have = Data.Credits(p, kind)
+	if not prof or have < 1 then
+		return false
+	end
+	prof.Credits[kind] = have - 1
+	publishCredits(p, prof)
+	return true
 end
 
 -- Returns true the first time a player is paid (that unlocks the RV start).

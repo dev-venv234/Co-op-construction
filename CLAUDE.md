@@ -504,6 +504,26 @@ The owner also pulled in two more trades, Welder and HVAC, and a tool shop on 20
     Gauge panels on a real phone, the Joysticks bonus in a hand lift, HVAC on a Two-Story (2 floors). Screenshots timed
     out this session, so the shop and new panels haven't been looked at on screen yet.
 
+- **PurchaseService: monetization for launch (2026-11-16, branch `purchase-service`, owner away: built autonomously).**
+  Plan and assumptions (logged while building; the final summary is at the end of this entry):
+  * Checkpoint: the tree was clean and Studio matched `src/` (77 scripts hashed), so there was nothing to commit;
+    tag `checkpoint-before-PurchaseService` marks db5b968 instead of an empty commit. All work is on `purchase-service`.
+  * One `MarketplaceService.ProcessReceipt` handler (`PurchaseService`). The receipt id and what it gave are written in
+    the same profile save; PurchaseGranted only after that save succeeds; anything else returns NotProcessedYet.
+  * A receipt is never left unresolved because of game state (Roblox does not refund unresolved purchases): a boost
+    bought with nothing to use it on becomes a saved **credit** the player can USE later for free.
+  * The server prompts purchases (`PromptProductPurchase` from the server) only after its own checks pass, so "no
+    active job" means no prompt and no charge. Clients never send prices or product ids, only a product key.
+  * Assumptions: (1) Hire a Pro upgrades / adds a skilled bot on the empty trade with the most work left (server
+    picks; no trade argument from the client); it stays for the whole job even if a player later picks that trade.
+    (2) Retry Inspection = after a final inspection with collapses, the crew gets a short window to take a retry:
+    the fallen pieces become rebuild tasks (normal task engine) and the inspector walks again; unrebuilt pieces are
+    still charged, so a retry can never cost more than the first result. Deadline misses are not covered.
+    (3) 2x Pay doubles the buyer's net paycheck (after fines and damage). (4) Cash packs: 49 R$ = $1,500,
+    149 R$ = $5,000, 299 R$ = $11,000, 499 R$ = $20,000 (tune later). (5) Prices: Rush 39 R$, Pro 79 R$, Retry 35 R$,
+    2x Pay 299 R$ (inside PLAN.md's ranges). (6) Mock purchases run only in Studio with the workspace attribute
+    `DevMockPurchases` set, or through the server-only `ServerStorage.DevPurchase` test hook.
+
 ## Studio workflow notes (learned the hard way)
 - Seats auto-seat whoever touches them. Any seat with a trade rule must also check `Occupant` on the server and eject.
 - Animate client UI on `RunService.Heartbeat`, not RenderStepped: RenderStepped doesn't fire when Studio isn't rendering
