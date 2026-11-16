@@ -251,6 +251,9 @@ local function showPayout(d: { [string]: any })
 		if (d.finesCount or 0) > 0 then
 			table.insert(lines, ("Inspector fines: -$%d (%d unfixed)"):format(d.fines or 0, d.finesCount))
 		end
+		if (d.passBonus or 0) > 0 then
+			table.insert(lines, ("2x Pay pass: +$%d"):format(d.passBonus))
+		end
 		table.insert(lines, ("YOU EARNED: $%d"):format(d.pay or 0))
 		if d.note then
 			table.insert(lines, d.note)

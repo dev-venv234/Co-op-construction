@@ -916,7 +916,10 @@ finish = function(success: boolean, damage: { [Player]: number }?, fallen: numbe
 		for _, pl in Players:GetPlayers() do
 			local tasks = contributors[pl] or 0
 			local myDamage = if damage then damage[pl] or 0 else 0
-			local earned = if tasks > 0 then math.max(0, pay - fine - myDamage) else 0
+			local net = if tasks > 0 then math.max(0, pay - fine - myDamage) else 0
+			-- 2x Pay game pass: the buyer's own paycheck only (EconomyService asks PurchaseService; 1 or 2, never more)
+			local boost = if net > 0 then S.EconomyService.PayBoost(pl) else 1
+			local earned = net * boost
 			local note: string? = nil
 			if earned > 0 then
 				S.EconomyService.AddCash(pl, earned, cur.bp.DisplayName .. " job")
@@ -939,6 +942,7 @@ finish = function(success: boolean, damage: { [Player]: number }?, fallen: numbe
 				early = parts.early,
 				base = parts.base,
 				pay = earned,
+				passBonus = earned - net, -- extra from the 2x Pay pass (0 without it)
 				tasks = tasks,
 				timeLeft = timeLeft,
 				fines = if tasks > 0 then math.min(fine, pay) else 0,

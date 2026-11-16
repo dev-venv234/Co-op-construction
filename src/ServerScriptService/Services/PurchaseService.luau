@@ -1,5 +1,6 @@
 --!strict
--- Monetization (2026-11-16): the ONE MarketplaceService.ProcessReceipt handler for every developer product.
+-- Monetization (2026-11-16): the ONE MarketplaceService.ProcessReceipt handler for every developer product, and
+-- the 2x Pay game pass.
 -- Catalog: ServerStorage.Config.Products (authoritative; ids are placeholders until the owner creates them).
 --
 -- Rules this file keeps:
@@ -14,6 +15,9 @@
 --    no prompt, so no charge. Prices and ids never come from a client.
 --  * Boosts work through the normal game systems (JobService, BotService, InspectionService); nothing here
 --    finishes a job.
+--  * 2x Pay (game pass, buyer only): ownership is asked from Roblox when the player joins and again when a pass
+--    purchase prompt closes (never taken from the prompt's "purchased" flag alone). It is not stored in the profile.
+--    The payout asks EconomyService.PayBoost, which this service feeds.
 -- Studio only: real purchases can't run in Studio. With the workspace attribute DevMockPurchases = true the Buy
 -- button runs a fake receipt through the same handler; ServerStorage.DevPurchase (a BindableFunction, server side
 -- only) does the same for tests and can replay a PurchaseId or fake a failed save.
@@ -43,6 +47,8 @@ local keyByProductId: { [number]: string } = {}
 local mockIdByKey: { [string]: number } = {}
 local inFlight: { [string]: boolean } = {} -- PurchaseIds being handled right now
 local wants: { [Player]: { [string]: number } } = {} -- boost key -> when the player last asked to buy it
+local passOwned: { [Player]: boolean } = {} -- 2x Pay, as confirmed by Roblox this session
+local PASS = Items.DoublePay
 
 -- A boost: can(p) says whether it has something to work on right now (and why not); apply(p) does it, without
 -- yielding, through the owning service. Registered in Start.
@@ -77,6 +83,8 @@ local function sendCatalog(p: Player)
 			row.Ready, row.Why = canUse(p, key)
 		elseif it.Type == "Cash" then
 			row.Cash = it.Cash
+		elseif it.Type == "Pass" then
+			row.Owned = passOwned[p] == true
 		end
 		table.insert(items, row)
 	end
@@ -103,6 +111,73 @@ local function useCredit(p: Player, key: string): boolean
 	print(("[Purchase] %s used %s"):format(p.Name, key))
 	task.spawn(S.DataService.Save, p, false)
 	return true
+end
+
+---------------------------------------------------------------------------------------------------------------
+-- 2x Pay game pass
+---------------------------------------------------------------------------------------------------------------
+
+function Purchase.HasDoublePay(p: Player): boolean
+	return passOwned[p] == true
+end
+
+local function setPass(p: Player, owned: boolean, how: string)
+	if not p.Parent or passOwned[p] == owned then
+		return
+	end
+	passOwned[p] = owned
+	p:SetAttribute("DoublePay", owned) -- display copy for the store panel and HUD
+	if owned then
+		print(("[Purchase] %s has 2x Pay (%s)"):format(p.Name, how))
+	end
+end
+
+-- Asks Roblox whether the player owns the pass. nil = Roblox didn't answer.
+local function ownsPass(p: Player): boolean?
+	if PASS.Id <= 0 then
+		return false
+	end
+	local ok, owns = pcall(function()
+		return MarketplaceService:UserOwnsGamePassAsync(p.UserId, PASS.Id)
+	end)
+	if not ok then
+		return nil
+	end
+	return owns == true
+end
+
+-- On join: keep asking (slowly) until Roblox answers, so an owner never loses the pass to an API hiccup.
+local function checkPassOnJoin(p: Player)
+	local wait = 2
+	while p.Parent do
+		local owns = ownsPass(p)
+		if owns ~= nil then
+			setPass(p, owns, "owned on join")
+			return
+		end
+		task.wait(wait)
+		wait = math.min(wait * 2, 60)
+	end
+end
+
+-- A pass prompt closed saying "purchased". That flag is never trusted on its own: the pass counts once Roblox's own
+-- ownership check says so (its cache is refreshed when this event fires; a few tries cover any delay).
+local function onPassPromptFinished(p: Instance, passId: number, purchased: boolean)
+	if not purchased or passId ~= PASS.Id or PASS.Id <= 0 or not p:IsA("Player") or passOwned[p] then
+		return
+	end
+	for _, pause in { 0, 1, 2, 4, 8 } do
+		task.wait(pause)
+		if not p.Parent then
+			return
+		end
+		if ownsPass(p) == true then
+			setPass(p, true, "bought in game")
+			Toast:FireAllClients(("%s bought 2x PAY: double paychecks from now on!"):format(p.Name))
+			return
+		end
+	end
+	warn("[Purchase] a 2x Pay purchase was reported for", p.Name, "but Roblox doesn't show the pass: not granted")
 end
 
 ---------------------------------------------------------------------------------------------------------------
@@ -277,8 +352,24 @@ local function onBuy(p: Player, key: string)
 		wants[p] = wants[p] or {}
 		wants[p][key] = os.clock()
 		prompt(p, key)
-	else
-		Toast:FireClient(p, it.Name .. " isn't on sale yet")
+	elseif it.Type == "Pass" then
+		if passOwned[p] then
+			Toast:FireClient(p, "You already own " .. it.Name)
+		elseif mockOn() then
+			print(("[Purchase] MOCK pass purchase by %s (Studio only)"):format(p.Name))
+			setPass(p, true, "mock")
+			Toast:FireAllClients(("%s bought 2x PAY: double paychecks from now on!"):format(p.Name))
+			sendCatalog(p)
+		elseif it.Id <= 0 then
+			Toast:FireClient(p, it.Name .. " isn't on sale yet")
+		else
+			local ok, err = pcall(function()
+				MarketplaceService:PromptGamePassPurchase(p, it.Id)
+			end)
+			if not ok then
+				warn("[Purchase] could not open the pass prompt:", err)
+			end
+		end
 	end
 end
 
@@ -337,8 +428,21 @@ function Purchase.Start()
 		end
 	end)
 
+	-- 2x Pay: the payout asks EconomyService.PayBoost; ownership comes from Roblox on join and after a purchase.
+	S.EconomyService.SetPayBoost(function(p: Player): number
+		return if passOwned[p] == true then PASS.Multiplier else 1
+	end)
+	MarketplaceService.PromptGamePassPurchaseFinished:Connect(onPassPromptFinished)
+	Players.PlayerAdded:Connect(function(p)
+		task.spawn(checkPassOnJoin, p)
+	end)
+	for _, p in Players:GetPlayers() do
+		task.spawn(checkPassOnJoin, p)
+	end
+
 	Players.PlayerRemoving:Connect(function(p)
 		wants[p] = nil
+		passOwned[p] = nil
 	end)
 
 	-- Studio-only test hook (server side; clients can't reach ServerStorage), like JobService's DevTrigger.
@@ -349,6 +453,10 @@ function Purchase.Start()
 			local pl = Players:FindFirstChild(playerName)
 			if not pl or not pl:IsA("Player") then
 				return "NoPlayer"
+			end
+			if key == "DoublePay" then
+				setPass(pl, not (opts and opts.remove), "mock") -- the pass has no receipt: just flip ownership
+				return "PassSet"
 			end
 			return mockReceipt(pl, key, opts)
 		end
