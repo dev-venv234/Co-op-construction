@@ -607,6 +607,34 @@ The owner also pulled in two more trades, Welder and HVAC, and a tool shop on 20
 - **Studio-only switch added:** `DevMockPurchases` (the store's Buy button runs a fake receipt). Same rule as the
   others: Edit mode only, for a test, removed right after.
 
+- **Camp + Crew Supply polish (2026-11-17, branch `camp-polish`, owner: "the spawn point area looks really bare, the
+  rvs look bland, the coffee area also, and the crew supply is akward"; owner away, done autonomously):**
+  * `ServerStorage/DevTools/CampPolishBuilder` (edit-time, `require(it).Build()`, re-runnable): a `Polish` model in each
+    `RVPark.RVs.RV_n` (livery per RV: repainted body / stripe / caps, dark window band, pinstripe, brand name, headlights,
+    bumpers, solar panels, dish, spare wheel; the old flat `Awning` is hidden and replaced by a striped one with a
+    valance and string lights; rug, two camp chairs, potted plants, grill, cooler, table lantern, SITE n post, power
+    pedestal) and `RVPark.Polish` (spawn plaza: the `SpawnLocation` restyled to slate with its decal removed, a stone
+    circle with lanterns, flower beds, a signpost to COFFEE / TRUCK LOT + JOBS / CREW SUPPLY / CAMPFIRE, a CREW CAMP
+    welcome board; festoon lights zigzagging over the camp lane; 13 pines + 60 shrubs on open grass only (`NO_GO`
+    rects keep pads, lane, patio, campfire, tents and the walk to the café clear); campfire stumps, firewood, string
+    lights, two tents; café: giant cup with steam on the kiosk roof, red/white awning stripes + valance, OPEN sign,
+    menu board, A-frame, round umbrellas, two more tables, string lights on four poles, planters, patio heaters,
+    coffee sacks, bike rack). Decor doesn't collide except poles, posts, tents, planters and tree trunks. 24 lights,
+    all `NightLight` (DayNightService switches them). Terrain under the plaza is Ground (no grass poking through).
+  * `ServerStorage/DevTools/SupplyStoreBuilder` rebuilt as a one-way drive-through: IN driveway at x -49, OUT at
+    x -155 (curb cut, asphalt), the old middle driveway (x -112..-88, it ran into a canopy post) closed back to grass
+    and sidewalk; yellow LOADING BAY box under the canopy, arrows, IN / OUT words, a hanging "STOP IN THE YELLOW BAY"
+    sign, ENTER / EXIT signs, post guards, the CREW SUPPLY pylon moved onto the grass between the driveways, hedges,
+    a forklift, cones. Fixed: two side racks divided by zero (`length / 0`: parts at NaN positions far outside the map).
+    The hardware store's three parked cars (`TownLife.ParkedCars.Parked_Hardware`) stood in the loading lane: moved to
+    a new staff lot east of the store (x -46, z -500..-524), and `LifeBuilder` now parks them there too.
+    The terrain grid along Main St's north side runs on z = 2 mod 4 (grass -430..-422, sidewalk -422..-418).
+  * GuideController's first hint now lists all 6 trades.
+  * Tested in Studio: before / after screenshots of the park, spawn, an RV, the café, the campfire and Crew Supply;
+    drive-through loading still works in the new bay (Shed load 3/3); no script errors. Not tested: phone frame rate
+    with the extra ~1,600 parts and 24 lights (all non-colliding decor), and a player actually driving the IN -> OUT
+    route (the truck was placed in the bay by script).
+
 ## Studio workflow notes (learned the hard way)
 - Seats auto-seat whoever touches them. Any seat with a trade rule must also check `Occupant` on the server and eject.
 - Animate client UI on `RunService.Heartbeat`, not RenderStepped: RenderStepped doesn't fire when Studio isn't rendering

@@ -209,20 +209,12 @@ local function parked()
 	if used == 0 and gas then
 		park({ { (gas.Min.X + gas.Max.X) / 2 - 20, gas.Max.Y - 22, math.pi / 2 } }, "Parked_GasStation")
 	end
-	-- hardware store: a row in the lot near the street, noses toward the store (north)
+	-- hardware store: the staff lot east of the store, noses west toward it (not the yard in front: that is Crew
+	-- Supply's drive-through loading lane since 2026-11-17, DevTools/SupplyStoreBuilder)
 	local hw = lot("Hardware")
 	if hw then
-		local row = hw.Max.Y - 22
-		local k = 0
-		for x = hw.Min.X + 14, hw.Max.X - 14, 13 do
-			if k >= 3 then
-				break
-			end
-			local before = n
-			park({ { x, row, 0 } }, "Parked_Hardware")
-			if n > before then
-				k += 1
-			end
+		for k = 0, 2 do
+			park({ { -46, -500 - k * 12, math.pi / 2 } }, "Parked_Hardware")
 		end
 	end
 	return n

@@ -102,7 +102,7 @@ local function objective(): (string, ProximityPrompt?)
 	local role = UI.MyRole()
 	local st = UI.State
 	if not role then
-		return "Tap Pick trade (left side) and choose your job: Foreman, Laborer, Operator or Electrician", nil
+		return "Tap Pick trade (left side) and choose your job: Foreman, Laborer, Operator, Electrician, Welder or HVAC", nil
 	end
 	if not st.active then
 		local btn = nearest(function(pp)
