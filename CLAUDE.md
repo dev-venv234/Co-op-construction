@@ -527,7 +527,7 @@ The owner also pulled in two more trades, Welder and HVAC, and a tool shop on 20
     Added during the adversarial pass: (7) at most 2 hired pros per job; (8) Rush Delivery needs a trade first
     (the delivery is credited to the buyer like any task); (9) no retry offer, and no wait, when the retry is not on
     sale and nobody on the server has one saved.
-  * **Final summary (2026-11-16). Nothing can be bought yet: every id in `Config/Products` is a placeholder (0).**
+  * **Final summary (2026-11-16). Ids filled in on 2026-11-17 (see the Creator Dashboard item below).**
   * **What was built** (10 commits on `purchase-service`, one per piece; `main` untouched, nothing pushed):
     - `ServerStorage/Config/Products` (authoritative): 3 boosts, 4 cash packs, the 2x Pay pass; `Id = 0` = not on sale.
     - `DataService` profile v6: `Receipts` (granted purchase ids, newest 150), `Credits` (paid boosts not used yet),
@@ -574,13 +574,12 @@ The owner also pulled in two more trades, Welder and HVAC, and a tool shop on 20
     is open; a second retry on one job; Hire a Pro on a house (machines, Welder, HVAC as the pro); two or more
     players (who sees what, a crew member joining or leaving mid-boost was reasoned through, not run); the store on
     a real phone. Screenshots are still unavailable, so the store has not been looked at on screen.
-  * **Creator Dashboard: what the owner must do before anything is on sale**
-    1. Monetization > Developer Products: create 7 products with these names and prices: Rush Delivery 39 R$,
-       Hire a Pro 79 R$, Retry Inspection 35 R$, Cash: Toolbox 49 R$, Cash: Truckload 149 R$, Cash: Payroll 299 R$,
-       Cash: Contractor 499 R$.
-    2. Monetization > Passes: create 1 pass, 2x Pay, 299 R$, and put it on sale.
-    3. Paste each id over `Id = 0` in `ServerStorage/Config/Products` (keys RushDelivery, HirePro, RetryInspection,
-       CashS, CashM, CashL, CashXL, DoublePay), in Studio and in `src/`. Keep `Cash` values whole numbers.
+  * **Creator Dashboard (DONE 2026-11-17, created by Claude in the dashboard with the owner signed in; all on sale,
+    fixed prices, managed pricing off, no icons yet):** Rush Delivery 3732927916 (39 R$), Hire a Pro 3732928088
+    (79), Retry Inspection 3732928149 (35), Cash: Toolbox 3732928197 (49), Cash: Truckload 3732928261 (149),
+    Cash: Payroll 3732928337 (299), Cash: Contractor 3732928414 (499); game pass 2x Pay 2093810959 (299). The ids are
+    in `ServerStorage/Config/Products`. A price changed in the dashboard needs the same change to `Robux` there (the
+    store's display text). Still to do by the owner:
     4. Game Settings > Security: enable Studio access to API services to test saving, then publish.
     5. Test live with a second account: one cash pack (cash arrives once; rejoin and it is still there), one boost
        with and without a job, and the pass (toast, doubled paycheck; a cancelled prompt grants nothing).
