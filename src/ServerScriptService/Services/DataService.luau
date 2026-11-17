@@ -31,6 +31,12 @@ local GRADE_RANK = { ["A+"] = 5, A = 4, B = 3, C = 2, D = 1 }
 local store: DataStore? = nil
 local profiles: { [Player]: any } = {}
 local canSave: { [Player]: boolean } = {}
+-- A player who is leaving (or a server that is closing) gets one last save that releases the session lock. Nothing
+-- else may write that profile after it: a later ordinary save would lock it again, and a purchase confirmed against
+-- a write that the final save then overwrites would be lost. So ordinary saves stop here (PurchaseService then
+-- answers NotProcessedYet and Roblox delivers the receipt again on the next join).
+local leaving: { [Player]: boolean } = {}
+local closing = false
 
 local function default(): { [string]: any }
 	return {
@@ -209,12 +215,13 @@ end
 
 -- Can this player's profile be written to the DataStore right now (store up, session lock held)?
 function Data.CanPersist(p: Player): boolean
-	return store ~= nil and canSave[p] == true and profiles[p] ~= nil
+	return store ~= nil and canSave[p] == true and profiles[p] ~= nil and not leaving[p] and not closing
 end
 
 -- Returns true only when the profile was written to the DataStore under this server's session lock. Otherwise
 -- false and why: "memory" (no DataStore at all: Studio with API access off), "no profile", "no session lock",
--- "session lock lost" (another server owns the profile now) or "datastore error".
+-- "leaving" (the final save is under way), "session lock lost" (another server owns the profile now) or
+-- "datastore error".
 -- PurchaseService relies on this: a purchase is only confirmed to Roblox after a true.
 function Data.Save(p: Player, release: boolean?): (boolean, string?)
 	local prof = profiles[p]
@@ -224,6 +231,9 @@ function Data.Save(p: Player, release: boolean?): (boolean, string?)
 	local cash = cashValue(p)
 	if cash then
 		prof.Cash = cash.Value
+	end
+	if not release and (leaving[p] or closing) then
+		return false, "leaving"
 	end
 	if not store then
 		return false, "memory"
@@ -414,10 +424,12 @@ function Data.Start()
 		task.spawn(load, p)
 	end
 	Players.PlayerRemoving:Connect(function(p)
+		leaving[p] = true
 		Data.Save(p, true)
 		profiles[p] = nil
 		canSave[p] = nil
 		lastSettings[p] = nil
+		leaving[p] = nil
 	end)
 
 	-- Settings from the client: only known keys, of the right type and range, at most twice a second.
@@ -449,6 +461,7 @@ function Data.Start()
 		p:SetAttribute("Settings", HttpService:JSONEncode(prof.Settings))
 	end)
 	game:BindToClose(function()
+		closing = true
 		for p in profiles do
 			task.spawn(Data.Save, p, true)
 		end

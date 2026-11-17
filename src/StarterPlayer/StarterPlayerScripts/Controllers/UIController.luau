@@ -1,5 +1,6 @@
 --!strict
--- HUD (job timer/progress), trade picker, Drop button, toasts and the payout screen.
+-- HUD (job timer/progress), trade picker, Drop button, toasts and the payout screen (the Robux store is
+-- StoreController).
 -- Touch first: every button is >= 48 px tall, placed mid-screen so it never covers the thumbstick or jump.
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")

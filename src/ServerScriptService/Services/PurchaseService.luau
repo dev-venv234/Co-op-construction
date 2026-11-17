@@ -48,6 +48,7 @@ local mockIdByKey: { [string]: number } = {}
 local inFlight: { [string]: boolean } = {} -- PurchaseIds being handled right now
 local wants: { [Player]: { [string]: number } } = {} -- boost key -> when the player last asked to buy it
 local passOwned: { [Player]: boolean } = {} -- 2x Pay, as confirmed by Roblox this session
+local retryHolder: number? = nil -- UserId whose purchase prompt is holding a retry offer open
 local PASS = Items.DoublePay
 
 -- A boost: can(p) says whether it has something to work on right now (and why not); apply(p) does it, without
@@ -111,6 +112,20 @@ local function useCredit(p: Player, key: string): boolean
 	print(("[Purchase] %s used %s"):format(p.Name, key))
 	task.spawn(S.DataService.Save, p, false)
 	return true
+end
+
+-- Could anyone take a Retry Inspection right now (it's on sale, or someone has one saved)? InspectionService skips
+-- the offer and its wait when not.
+function Purchase.RetryAvailable(): boolean
+	if Items.RetryInspection.Id > 0 or mockOn() then
+		return true
+	end
+	for _, p in Players:GetPlayers() do
+		if S.DataService.Credits(p, "RetryInspection") > 0 then
+			return true
+		end
+	end
+	return false
 end
 
 ---------------------------------------------------------------------------------------------------------------
@@ -351,8 +366,9 @@ local function onBuy(p: Player, key: string)
 		end
 		wants[p] = wants[p] or {}
 		wants[p][key] = os.clock()
-		if key == "RetryInspection" then
+		if key == "RetryInspection" and (it.Id > 0 or mockOn()) then
 			S.InspectionService.HoldRetry() -- the offer waits (once) while this player is in the purchase prompt
+			retryHolder = p.UserId
 		end
 		prompt(p, key)
 	elseif it.Type == "Pass" then
@@ -405,7 +421,11 @@ function Purchase.Start()
 
 	-- Boosts: each one works through the service that owns that part of the game.
 	boosts.RushDelivery = {
-		can = function(_p: Player)
+		can = function(p: Player): (boolean, string?)
+			-- the delivery is credited to the buyer like any task, so the same rule applies: a trade first
+			if not S.CrewService.GetRole(p) then
+				return false, "Pick a trade first"
+			end
 			return S.JobService.CanRush()
 		end,
 		apply = function(p: Player)
@@ -432,8 +452,9 @@ function Purchase.Start()
 	}
 	-- A retry prompt that closed without a purchase stops holding the offer open. (Only a hint for the timer: the
 	-- purchase itself is only ever granted by the receipt.)
-	MarketplaceService.PromptProductPurchaseFinished:Connect(function(_userId: number, productId: number, purchased: boolean)
-		if not purchased and productId == Items.RetryInspection.Id and productId > 0 then
+	MarketplaceService.PromptProductPurchaseFinished:Connect(function(userId: number, productId: number, purchased: boolean)
+		if not purchased and productId == Items.RetryInspection.Id and productId > 0 and userId == retryHolder then
+			retryHolder = nil
 			S.InspectionService.ReleaseRetry()
 		end
 	end)

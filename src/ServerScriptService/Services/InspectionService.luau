@@ -398,7 +398,10 @@ function Inspection.Run(cur: any, onDone: ({ [Player]: number }, number) -> ())
 			if token ~= my or S.JobService.Current() ~= cur then
 				return
 			end
-			if #down == 0 or round >= MAX_RETRIES or not waitForRetry(cur, my, #down) then
+			-- no offer (and no wait) when nobody could take one: not on sale and no saved retry on this server
+			local canOffer = #down > 0 and round < MAX_RETRIES and S.PurchaseService ~= nil
+				and S.PurchaseService.RetryAvailable()
+			if not canOffer or not waitForRetry(cur, my, #down) then
 				break
 			end
 			round += 1

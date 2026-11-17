@@ -35,6 +35,7 @@ local START_GRACE = 8 -- seconds after a job starts before bots join (time to pi
 -- going through the same slot rules and task engine as everyone else.
 local PRO_AIM_SPREAD = 0.1
 local PRO_MACHINE_AIM = 0.6
+local MAX_PROS = 2 -- per job: pros speed a crew up, they don't replace it (monetization rule)
 local SKINS = {
 	Color3.fromRGB(234, 184, 146), Color3.fromRGB(198, 140, 100), Color3.fromRGB(141, 85, 54),
 	Color3.fromRGB(255, 205, 170), Color3.fromRGB(110, 70, 45),
@@ -671,6 +672,13 @@ function BotService.CanHirePro(): (boolean, string?)
 	end
 	if cur.inspecting then
 		return false, "The job is at final inspection: there's no work left for a pro"
+	end
+	local hired = 0
+	for _ in proRole do
+		hired += 1
+	end
+	if hired >= MAX_PROS then
+		return false, ("This job already has %d pros: that's the limit"):format(MAX_PROS)
 	end
 	if not proCandidate() then
 		return false, "No empty trade with work left: a pro takes a trade no player is on"
