@@ -8,9 +8,9 @@
 --    (security audit H3: a Foreman can't hold the crew up).
 --  * Pings: tap a preset ("Here", "Need help", "Bring lumber", "Watch out") and it shows a marker where you're
 --    looking for the whole crew. Rate limited, position checked against the sender.
---  * Kick: always a vote of at least two people. With the Foreman among the voters one more crew member is enough;
---    otherwise most of the rest of the crew. Votes count for KICK_VOTE_SECONDS. (Audit H3: the Foreman used to
---    kick alone and at once, and the Foreman slot is first come, first served.)
+--  * Kick: a vote of most of the rest of the crew, never fewer than two people; the Foreman's vote counts like anyone's.
+--    Votes count for KICK_VOTE_SECONDS. (Audit H3: the Foreman used to kick alone and at once, and the Foreman slot
+--    is first come, first served.)
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -81,7 +81,7 @@ function Crew.TryRestore(p: Player): string?
 	return last
 end
 
-local START_GRACE = 90 -- seconds the Foreman has to start a job before anyone may
+local START_GRACE = 60 -- seconds the Foreman has to start a job before anyone may
 local KICK_VOTE_SECONDS = 120 -- how long a kick vote counts
 local idleSince = os.clock() -- when the crew last became free to start a job (server start, or a job cleared)
 
@@ -98,11 +98,8 @@ function Crew.CanStartJobs(p: Player): (boolean, string?)
 	return true, nil
 end
 
--- Votes needed to remove a player. Never fewer than two people, the Foreman included.
-function Crew.VotesNeeded(others: number, foremanVoted: boolean): number
-	if foremanVoted then
-		return 2
-	end
+-- Votes needed to remove a player: most of the rest of the crew, never fewer than two.
+function Crew.VotesNeeded(others: number): number
 	return math.max(2, math.floor(others / 2) + 1)
 end
 
@@ -196,24 +193,21 @@ function Crew.Start()
 		local v = votes[target] or {}
 		votes[target] = v
 		v[p] = now
-		local have, foremanVoted = 0, false
+		local have = 0
 		for voter, at in v do
 			if voter.Parent == Players and now - at <= KICK_VOTE_SECONDS then
 				have += 1
-				foremanVoted = foremanVoted or roles[voter] == "Foreman"
 			else
 				v[voter] = nil -- left, or the vote is too old
 			end
 		end
-		local need = Crew.VotesNeeded(#Players:GetPlayers() - 1, foremanVoted)
+		local need = Crew.VotesNeeded(#Players:GetPlayers() - 1)
 		if have >= need then
 			votes[target] = nil
-			Toast:FireAllClients(if foremanVoted then ("%s was removed from the crew by the Foreman and the crew"):format(target.Name)
-				else ("%s was voted out of the crew"):format(target.Name))
+			Toast:FireAllClients(("%s was voted out of the crew"):format(target.Name))
 			target:Kick("Your crew voted to remove you.")
 		else
-			Toast:FireAllClients(("Vote to remove %s: %d/%d%s"):format(target.Name, have, need,
-				if foremanVoted then " (the Foreman needs one more crew member to agree)" else ""))
+			Toast:FireAllClients(("Vote to remove %s: %d/%d"):format(target.Name, have, need))
 		end
 	end)
 

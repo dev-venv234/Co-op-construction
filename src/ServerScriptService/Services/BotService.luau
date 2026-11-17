@@ -45,6 +45,11 @@ local S: any
 local bots: { Bot } = {}
 local rng = Random.new()
 local proRole: { [string]: boolean } = {} -- trades with a hired pro on this job
+-- Helper bots: a trade a player holds but hasn't worked for STALL_SECONDS while its work waits gets a bot until that
+-- player finishes a task of it again (CLAUDE.md: "no trade idle more than 1 minute"; an idle Operator used to stall
+-- the Shed's roof). role -> os.clock() when the helper was called.
+local STALL_SECONDS = 60
+local helping: { [string]: number } = {}
 local folder: Folder
 
 function BotService.Init(services)
@@ -586,6 +591,21 @@ local function wanted(): { [string]: number }
 	for role in proRole do
 		out[role] = math.max(out[role] or 0, 1)
 	end
+	-- a trade a player holds but isn't working: a helper until that player works it again
+	for role in S.JobService.StalledRoles(STALL_SECONDS) do
+		if #(crew[role] or {}) > 0 and not helping[role] then
+			helping[role] = os.clock()
+			Net.Event("Toast"):FireAllClients(("The %s work sat untouched for a minute: a bot is helping until the %s gets back to it"):format(
+				role, role))
+		end
+	end
+	for role, since in helping do
+		if #(crew[role] or {}) == 0 or S.JobService.PlayerWorkedSince(role, since) then
+			helping[role] = nil -- the player is back on it (or left the trade: the normal rule covers that)
+		else
+			out[role] = math.max(out[role] or 0, 1)
+		end
+	end
 	return out
 end
 
@@ -621,8 +641,11 @@ local function reconcile()
 					end
 					table.insert(bots, b)
 					task.spawn(brain, b)
-					Toast:FireAllClients(if asPro then "The pro " .. role .. " is on site"
-						else role .. " bot joined the crew (it fills the empty trade)")
+					if asPro then
+						Toast:FireAllClients("The pro " .. role .. " is on site")
+					elseif not helping[role] then -- (a helper was already announced)
+						Toast:FireAllClients(role .. " bot joined the crew (it fills the empty trade)")
+					end
 					changed = true
 				end
 			end
@@ -638,6 +661,7 @@ local function clearAll()
 		despawn(bots[i])
 	end
 	table.clear(proRole) -- a pro is hired for one job
+	table.clear(helping)
 end
 
 ---------------------------------------------------------------------------------------------------------------
@@ -721,6 +745,19 @@ function BotService.Start()
 	S.JobService.Cleared.Event:Connect(clearAll)
 	S.CrewService.Changed.Event:Connect(function()
 		task.defer(reconcile)
+	end)
+	-- every few seconds during a job: notices a trade that has stalled (helper bots), and when its player is back
+	task.spawn(function()
+		while true do
+			task.wait(5)
+			local cur = S.JobService.Current()
+			if cur and not cur.finishing and os.clock() - cur.startedAt >= START_GRACE then
+				local ok, err = pcall(reconcile)
+				if not ok then
+					warn("[Bots] reconcile:", err)
+				end
+			end
+		end
 	end)
 end
 

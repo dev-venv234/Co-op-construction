@@ -29,7 +29,7 @@ deadline while things go wrong, then gets paid and upgrades. Players *are* the c
 - **Payout:** base pay × quality (0.5×–1.5×), +25% for finishing early, minus damage/rework. Whoever causes damage gets no pay for it.
   Since 2026-11-16 the paycheck is also × your share of the job: full pay needs about 10% of the job's tasks (3–10, or all of your trade's tasks if fewer) and being there for half the job; less pays in proportion.
 - **Drives** to site stay under 60 seconds.
-- **Griefers:** crew kick vote; Foreman can kick with one more crew member agreeing (never alone, since 2026-11-16).
+- **Griefers:** crew kick vote (most of the crew; since 2026-11-16 the Foreman's vote counts like anyone's).
 - **Monetization rule:** sell speed, style and status. **Never sell** auto-build, skip-phase, or anything that finishes a job without the crew. Best truck must stay earnable by grinding.
 
 ### Job tiers (starting numbers, tune in playtests)
@@ -597,7 +597,13 @@ The owner also pulled in two more trades, Welder and HVAC, and a tool shop on 20
     tasks then idle = 33% ($293, no job XP). The late-join part was tested only as a function.
   * H3 `CrewService`: a kick always needs 2 voters (Foreman + 1, or most of the crew; votes last 120 s); anyone may
     start a job 90 s after the crew became free. Tested only as functions: needs 2+ real players.
-  * Learned: on the Shed the roof is an Operator task, so an idle player holding Operator stalls the job.
+  * Learned: on the Shed the roof is an Operator task, so an idle player holding Operator stalled the job.
+  * Second pass (owner: "so fix these"): MoveGuard 1.12 x walk speed, 1.2 s allowance (no false alarms walking or
+    jumping; 100-stud teleport trusted after 4.4 s vs 6.2 s walking). Full pay = `ShareFair` 0.4 of your trade's
+    tasks split between its players (min 3). Helper bots: a trade a player holds but hasn't worked for 60 s while
+    its work waits gets a bot until that player finishes a task of it (`Job.StalledRoles`, `PlayerWorkedSince`;
+    BotService reconciles every 5 s during a job). Kicks: most of the rest of the crew, Foreman counts as one; start
+    grace 60 s.
 
 - **Studio-only switch added:** `DevMockPurchases` (the store's Buy button runs a fake receipt). Same rule as the
   others: Edit mode only, for a test, removed right after.

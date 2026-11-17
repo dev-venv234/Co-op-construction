@@ -82,11 +82,17 @@ function Economy.ComputePayout(cfg: any, avgAccuracy: number, timeLeft: number):
 	return math.floor(pay + 0.5), { base = cfg.BasePay, quality = quality, early = early }
 end
 
--- Tasks a player needs for a full paycheck: a share of the job's size, or every task their trade has on this job
--- when that is fewer (so a small trade that did all of its work is paid in full).
-function Economy.TasksForFullPay(cfg: any, jobTasks: number, tradeTasks: number): number
-	local bySize = math.clamp(math.floor(jobTasks * (cfg.ShareTasks or 0.1) + 0.5), cfg.ShareTasksMin or 3, cfg.ShareTasksMax or 10)
-	return math.max(1, if tradeTasks > 0 then math.min(bySize, tradeTasks) else bySize)
+-- Tasks a player needs for a full paycheck.
+--  * Working a trade: ShareFair of that trade's tasks on this job, split between the players who mainly worked it
+--    (at least ShareTasksMin, or all of the trade's tasks when it has fewer). So doing a few tasks and then idling
+--    no longer pays in full; a small trade that did all of its work still does.
+--  * No trade work at all (loading only): ShareTasks of the job's tasks (ShareTasksMin..ShareTasksMax).
+function Economy.TasksForFullPay(cfg: any, jobTasks: number, tradeTasks: number, workers: number?): number
+	if tradeTasks > 0 then
+		local fair = math.ceil((cfg.ShareFair or 0.4) * tradeTasks / math.max(1, workers or 1))
+		return math.max(1, fair, math.min(cfg.ShareTasksMin or 3, tradeTasks))
+	end
+	return math.max(1, math.clamp(math.floor(jobTasks * (cfg.ShareTasks or 0.1) + 0.5), cfg.ShareTasksMin or 3, cfg.ShareTasksMax or 10))
 end
 
 -- How much of the paycheck a player earned (security audit H2: one task used to pay in full).

@@ -42,6 +42,7 @@ type Current = {
 	trips: number,
 	deadlineAt: number,
 	startedAt: number, -- os.clock() when the job started
+	roleWorked: { [string]: number }, -- os.clock() of the last task a player finished, per trade
 	joined: { [Player]: number }, -- os.clock() from which each player counts as on this job (pay share by time)
 	finishing: boolean,
 	inspecting: boolean?,
@@ -226,6 +227,9 @@ local function refresh(cur: Current)
 			local open = requirementsMet(cur, slot)
 			if open ~= slot.open then
 				slot.open = open
+				if open then
+					slot.openedAt = os.clock() -- (StalledRoles: how long its work has been waiting)
+				end
 				slot.prompt:SetAttribute("Open", open)
 				S.BlueprintService.SetVisual(slot, if open then "open" else "locked")
 			end
@@ -242,6 +246,9 @@ local function complete(cur: Current, slot: any, p: Instance, accuracy: number)
 	slot.done = true
 	slot.busyBy = nil
 	slot.prompt:Destroy()
+	if p:IsA("Player") then
+		cur.roleWorked[slot.def.Role] = os.clock() -- a player is working this trade (StalledRoles)
+	end
 	S.QualityService.Record(p, slot.def.Id, accuracy)
 	S.ProgressionService.AwardTask(p, accuracy)
 	S.BlueprintService.SetVisual(slot, "done")
@@ -939,6 +946,7 @@ function Job.StartJob(p: Player, siteId: string, opts: { dropIn: boolean? }?): b
 		trips = 0,
 		deadlineAt = workspace:GetServerTimeNow() + cfg.Deadline,
 		startedAt = os.clock(),
+		roleWorked = {},
 		joined = {},
 		finishing = false,
 	}
@@ -1014,24 +1022,35 @@ finish = function(success: boolean, damage: { [Player]: number }?, fallen: numbe
 		end
 		local nowClock = os.clock()
 		local jobSeconds = nowClock - cur.startedAt
-		local paidPlayers: { Player } = {}
+		-- the trade each player mostly worked, and how many players mainly worked each trade
+		local mainRoleOf: { [Player]: string } = {}
+		local workers: { [string]: number } = {}
 		for _, pl in Players:GetPlayers() do
-			local tasks = contributors[pl] or 0
-			local myDamage = if damage then damage[pl] or 0 else 0
-			-- the trade this player mostly worked decides how many tasks a full paycheck needs
 			local mine: { [string]: number } = {}
-			local mainRole: string?, mainN = nil, 0
+			local best: string?, bestN = nil, 0
 			for _, id in S.QualityService.TasksOf(pl) do
 				local slot = cur.slots[id]
 				if slot then
 					local r = slot.def.Role
 					mine[r] = (mine[r] or 0) + 1
-					if mine[r] > mainN then
-						mainRole, mainN = r, mine[r]
+					if mine[r] > bestN then
+						best, bestN = r, mine[r]
 					end
 				end
 			end
-			local need = S.EconomyService.TasksForFullPay(cur.cfg, #cur.order, if mainRole then roleTotals[mainRole] or 0 else 0)
+			if best then
+				mainRoleOf[pl] = best
+				workers[best] = (workers[best] or 0) + 1
+			end
+		end
+		local paidPlayers: { Player } = {}
+		for _, pl in Players:GetPlayers() do
+			local tasks = contributors[pl] or 0
+			local myDamage = if damage then damage[pl] or 0 else 0
+			-- the trade this player mostly worked decides how many tasks a full paycheck needs
+			local mainRole = mainRoleOf[pl]
+			local need = S.EconomyService.TasksForFullPay(cur.cfg, #cur.order,
+				if mainRole then roleTotals[mainRole] or 0 else 0, if mainRole then workers[mainRole] or 1 else 1)
 			local share, shareWhy = S.EconomyService.PayShare(cur.cfg, tasks, need,
 				nowClock - (cur.joined[pl] or cur.startedAt), jobSeconds)
 			local gross = math.floor(pay * share + 0.5)
@@ -1124,6 +1143,38 @@ function Job.OpenSlotsFor(role: string, from: Vector3): { any }
 		return (a.part.Position - from).Magnitude < (b.part.Position - from).Magnitude
 	end)
 	return out
+end
+
+-- Trades whose work is waiting on nobody: an open task nobody has claimed for `seconds`, and no player has finished
+-- a task of that trade for `seconds` either (bot work doesn't count). BotService sends a helper bot to a trade a
+-- player holds but isn't working (CLAUDE.md: no trade idle more than a minute). Deliveries are left out: the crew
+-- is busy loading and driving then.
+function Job.StalledRoles(seconds: number): { [string]: boolean }
+	local out: { [string]: boolean } = {}
+	local cur = current
+	if not cur or cur.finishing or cur.inspecting then
+		return out
+	end
+	local now = os.clock()
+	if now - cur.startedAt < seconds then
+		return out
+	end
+	for _, slot in cur.slots do
+		local role = slot.def.Role
+		if not out[role] and not slot.done and slot.open and not slot.busyBy and slot.def.Kind ~= "Deliver"
+			and not chaosBlock(slot)
+			and now - (slot.openedAt or cur.startedAt) >= seconds
+			and now - (cur.roleWorked[role] or cur.startedAt) >= seconds then
+			out[role] = true
+		end
+	end
+	return out
+end
+
+-- Has a player finished a task of this trade since `t` (os.clock)?
+function Job.PlayerWorkedSince(role: string, t: number): boolean
+	local cur = current
+	return cur ~= nil and (cur.roleWorked[role] or 0) > t
 end
 
 function Job.UsesRole(role: string): boolean

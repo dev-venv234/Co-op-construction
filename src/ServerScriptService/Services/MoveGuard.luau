@@ -5,7 +5,8 @@
 --
 -- For each player the server keeps a "trusted spot". It follows the character, but it can only move as fast as
 -- that character may really walk: the server's own WalkSpeed (so carrying something heavy slows it too) times
--- SLACK, plus a short allowance that builds up while standing or lagging (BURST_SECONDS). For a normal player the
+-- SLACK, plus a short allowance that builds up while standing or lagging (BURST_SECONDS). (Tightened 2026-11-16
+-- from 1.3 / 2.5 after the audit noted a cheater could still hop about 25% faster.) For a normal player the
 -- trusted spot is simply where they stand. Someone who teleports gains nothing: their trusted spot gets there when
 -- a walker would have, and until then prompts over there don't work.
 --  * Riding: the spot follows a seated player, as long as they reached the seat honestly (spot within RIDE_SNAP).
@@ -19,8 +20,8 @@ local ServerStorage = game:GetService("ServerStorage")
 
 local MoveGuard = {}
 
-local SLACK = 1.3 -- trusted speed = server walk speed x this
-local BURST_SECONDS = 2.5 -- allowance that can build up, in seconds of walking
+local SLACK = 1.12 -- trusted speed = server walk speed x this
+local BURST_SECONDS = 1.2 -- allowance that can build up, in seconds of walking
 local MIN_SPEED = 8 -- studs/s floor (a frozen or very slow character still catches up)
 local RIDE_SNAP = 18 -- sitting down counts when the trusted spot is this close
 local HOLD_SECONDS = 1.5 -- after a server teleport: how long to wait for the client to show up there

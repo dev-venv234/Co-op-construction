@@ -71,10 +71,14 @@ a message saying why.
 Measured in Studio: an honest walk stayed within 0.4 studs; a 300-stud teleport was trusted after 12.1 seconds
 (walking takes 18.8); a 118-stud teleport to a pile was refused for 5.1 seconds; riding 150 studs and the shuttle
 stayed at 0 lag.
-What is left: a cheater still gets up to 1.3 times walking speed and one 2.5-second burst (about 52 studs after
-standing still), which covers a short pile-to-slot hop about 25% sooner than walking. The dealer, tool shop and
-coffee counters still read the raw position; they only decide where a player may spend their own cash. Someone
-standing (not seated) on a moving truck falls behind and must wait a few seconds after stepping off.
+**Tightened (second pass, 2026-11-16):** 1.12 times walking speed and a 1.2-second allowance (was 1.3 and 2.5).
+Honest walking and jumping at 16, 13 (carrying) and 9 studs/s stayed within 0.52 studs, so no false alarms. A
+100-stud teleport is now trusted after 4.4 seconds (walking takes 6.2).
+What is left: over long distances a cheater is at most 12% faster than walking; on a short hop right after
+standing still, the 1.2-second allowance (about 21 studs) still makes it about 30% quicker. Going lower risks
+blocking honest players on laggy phones. The dealer, tool shop and coffee counters still read the raw position;
+they only decide where a player may spend their own cash. Someone standing (not seated) on a moving truck falls
+behind and must wait a few seconds after stepping off.
 
 ### H2. One finished task pays a full paycheck
 
@@ -97,8 +101,16 @@ now multiplied by the player's share, which is the smaller of two parts:
 - by time: a player on the server for less than half of the job is paid in proportion (joining at the end).
 Job XP and company points need a share of at least 50%. The numbers live in `ServerStorage/Config/Jobs`
 (`ShareTasks`, `ShareTasksMin`, `ShareTasksMax`, `SharePresent`). The payout panel shows the share and why.
-What is left: a player who is present from the start and does the needed handful of tasks, then idles, is still
-paid in full. That idler's own trade stalls unless they keep working, so the crew notices.
+**Second pass (2026-11-16):** the work part now scales with the player's own trade: full pay needs 40% of that
+trade's tasks on the job (`ShareFair`), split between the players who mainly worked it, never fewer than 3 (or all
+of the trade's tasks when it has fewer). Shed Laborer 10, Starter House Laborer 17 (9 each for two Laborers),
+Welder 4, HVAC 3. A player who does a handful and then idles is no longer paid in full.
+And a trade no longer stalls behind an idle player: if a player holds a trade but has not finished a task of it
+for 60 seconds while its work waits, a helper bot joins that trade (`Job.StalledRoles`, BotService `helping`) and
+stays until that player finishes a task of it again. The helper's work counts as bot work, so the idler's share
+drops further. Loading and delivery are excluded (the crew is busy driving then).
+What is left: someone who does 40% of a small trade's work and then idles is still paid in full; that is a fair
+share by design.
 
 ### H3. The Foreman slot gives an instant kick and control of job starts
 
@@ -119,8 +131,10 @@ job cleared); after that anyone may start one. The 90 seconds are counted from w
 dropping and re-taking Foreman does not reset them.
 Tested: the vote rule as a function (1, 2 and 5 other players, with and without the Foreman). Not tested: a real
 kick or a real start after the grace period, which need two or more players.
-What is left: a Foreman with one accomplice can still remove players, and a Foreman can still delay each job
-start by up to 90 seconds.
+**Second pass (2026-11-16):** the Foreman's vote now counts like anyone's: a kick always needs most of the rest of
+the crew, at least two (3 players: 2; 4: 2; 6: 3). The start grace is down to 60 seconds.
+What is left: a majority of a server can still remove someone (that is the vote working as intended), and a
+Foreman can still delay each job start by up to 60 seconds. A real kick still needs a 2+ player test.
 
 ## Medium
 
