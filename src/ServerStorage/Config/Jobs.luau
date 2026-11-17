@@ -13,6 +13,13 @@ local function job(blueprint: string, pay: number, minutes: number, earlyThresho
 		EarlyThreshold = earlyThreshold,
 		MinQuality = 0.5,
 		MaxQuality = 1.5,
+		-- A full paycheck needs a fair share of the job (EconomyService.PayShare): ShareTasks of the job's tasks
+		-- (never fewer than ShareTasksMin or more than ShareTasksMax), and being on the server for SharePresent
+		-- of the job's length. Less than that pays in proportion.
+		ShareTasks = 0.1,
+		ShareTasksMin = 3,
+		ShareTasksMax = 10,
+		SharePresent = 0.5,
 		Load = load,
 	}
 end

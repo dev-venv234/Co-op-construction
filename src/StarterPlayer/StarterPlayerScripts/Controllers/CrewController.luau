@@ -3,7 +3,8 @@
 --  * QUICK JOIN: the server gives you the trade the crew needs most.
 --  * PING: pick "Here" / "Need help" / "Bring lumber" / "Watch out"; the marker goes where your camera is looking
 --    and the whole crew sees it for a few seconds (no typing needed).
---  * CREW: list of players with a KICK button (instant for the Foreman, a vote for everyone else).
+--  * CREW: list of players with a KICK button (always a vote: the Foreman needs one more crew member, everyone
+--    else needs most of the crew).
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris = game:GetService("Debris")
@@ -227,7 +228,7 @@ function Crew.Start()
 			end
 		end
 		local imForeman = UI.MyRole() == "Foreman"
-		hint.Text = if imForeman then "You're the Foreman: KICK removes a player right away"
+		hint.Text = if imForeman then "You're the Foreman: KICK needs one more crew member to agree"
 			else "KICK starts a vote: most of the crew has to agree"
 		for _, pl in Players:GetPlayers() do
 			local row = Instance.new("Frame")

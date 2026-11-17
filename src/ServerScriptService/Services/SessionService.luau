@@ -79,6 +79,9 @@ local function place(p: Player, joining: boolean)
 		target = S.JobService.SiteSpawn() or target
 	end
 	c:PivotTo(target)
+	if S.MoveGuard then
+		S.MoveGuard.Snap(p, target.Position) -- the server moved them: that spot is trusted
+	end
 end
 
 local function onJoin(p: Player)

@@ -66,6 +66,17 @@ function Quality.RecordOf(slotId: string): Record?
 	return nil
 end
 
+-- The slot ids of every task this worker has on record (the payout uses them to see which trade they worked).
+function Quality.TasksOf(p: Instance): { string }
+	local out = {}
+	for _, r in records do
+		if (r.player :: any) == p then
+			table.insert(out, r.slotId)
+		end
+	end
+	return out
+end
+
 function Quality.Contributors(): { [Player]: number }
 	local out: { [Player]: number } = {}
 	for _, r in records do

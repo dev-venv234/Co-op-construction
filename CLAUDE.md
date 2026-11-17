@@ -27,8 +27,9 @@ deadline while things go wrong, then gets paid and upgrades. Players *are* the c
 - **Quality score:** accuracy of every task rolls up into a job grade.
 - **Inspection:** inspector walks the house; mistakes cost pay; skipped steps cause partial **collapse**.
 - **Payout:** base pay × quality (0.5×–1.5×), +25% for finishing early, minus damage/rework. Whoever causes damage gets no pay for it.
+  Since 2026-11-16 the paycheck is also × your share of the job: full pay needs about 10% of the job's tasks (3–10, or all of your trade's tasks if fewer) and being there for half the job; less pays in proportion.
 - **Drives** to site stay under 60 seconds.
-- **Griefers:** crew kick vote; Foreman can kick.
+- **Griefers:** crew kick vote; Foreman can kick with one more crew member agreeing (never alone, since 2026-11-16).
 - **Monetization rule:** sell speed, style and status. **Never sell** auto-build, skip-phase, or anything that finishes a job without the crew. Best truck must stay earnable by grinding.
 
 ### Job tiers (starting numbers, tune in playtests)
@@ -583,6 +584,20 @@ The owner also pulled in two more trades, Welder and HVAC, and a tool shop on 20
     4. Game Settings > Security: enable Studio access to API services to test saving, then publish.
     5. Test live with a second account: one cash pack (cash arrives once; rejoin and it is still there), one boost
        with and without a job, and the pass (toast, doubled paycheck; a cancelled prompt grants nothing).
+
+- **Audit fixes H1-H3 (2026-11-16, owner: "Yes, fix them"; details in `design/Security_Audit.md`):**
+  * H1 `Services/MoveGuard` (in the boot ORDER): a server-trusted spot per player that moves at most at the server
+    walk speed x 1.3 with a 2.5 s allowance; `JobService.near` uses it for players. `MoveGuard.Snap(p, pos)` after any
+    server teleport (crew shuttle, `SessionService.place`); `DevTrigger` snaps by default (3rd argument true = don't).
+    Studio hook `ServerStorage.DevMoveGuard`. Tested: walk lag 0.4 studs; 300-stud teleport trusted after 12.1 s;
+    pile refused 5.1 s after a 118-stud teleport; riding and shuttle at 0 lag.
+  * H2 pay share: `EconomyService.TasksForFullPay` / `PayShare`, numbers in `Config/Jobs` (`ShareTasks` 0.1, min 3,
+    max 10, `SharePresent` 0.5); `JobService` tracks `startedAt` / `joined`; payout fields `share`, `shareWhy`,
+    `needTasks`; job XP and company points need a share >= 0.5. Tested: full worker share 1 ($895); 1 of 3 Welder
+    tasks then idle = 33% ($293, no job XP). The late-join part was tested only as a function.
+  * H3 `CrewService`: a kick always needs 2 voters (Foreman + 1, or most of the crew; votes last 120 s); anyone may
+    start a job 90 s after the crew became free. Tested only as functions: needs 2+ real players.
+  * Learned: on the Shed the roof is an Operator task, so an idle player holding Operator stalls the job.
 
 - **Studio-only switch added:** `DevMockPurchases` (the store's Buy button runs a fake receipt). Same rule as the
   others: Edit mode only, for a test, removed right after.

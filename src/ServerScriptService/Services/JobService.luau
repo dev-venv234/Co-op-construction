@@ -41,6 +41,8 @@ type Current = {
 	delivered: { [string]: number }, -- bundles already unloaded at the site, per item
 	trips: number,
 	deadlineAt: number,
+	startedAt: number, -- os.clock() when the job started
+	joined: { [Player]: number }, -- os.clock() from which each player counts as on this job (pay share by time)
 	finishing: boolean,
 	inspecting: boolean?,
 	phaseNote: string?, -- shown as the phase instead of "Final inspection" (Retry Inspection: rebuilding)
@@ -87,8 +89,21 @@ local function rootOf(p: Instance): BasePart?
 	return if c then c:FindFirstChild("HumanoidRootPart") :: BasePart? else nil
 end
 
+-- Is this worker within reach of `pos`? For players this uses the server-trusted spot (MoveGuard), never the raw
+-- character position, which a modified client can put anywhere (security audit H1).
 local function near(p: Instance, pos: Vector3, reach: number): boolean
 	local root = rootOf(p)
+	if p:IsA("Player") and S.MoveGuard then
+		local at = S.MoveGuard.Position(p)
+		if at and (at - pos).Magnitude <= reach then
+			return true
+		end
+		-- standing there, but got there faster than anyone can walk: say why nothing happens
+		if root and (root.Position - pos).Magnitude <= reach and S.TaskEngine.Guard.Allow(p, "MoveToast", 3) then
+			Toast:FireClient(p, "Hold on: you got here faster than anyone can walk. Try again in a moment")
+		end
+		return false
+	end
 	return root ~= nil and (root.Position - pos).Magnitude <= reach
 end
 
@@ -923,8 +938,13 @@ function Job.StartJob(p: Player, siteId: string, opts: { dropIn: boolean? }?): b
 		delivered = {},
 		trips = 0,
 		deadlineAt = workspace:GetServerTimeNow() + cfg.Deadline,
+		startedAt = os.clock(),
+		joined = {},
 		finishing = false,
 	}
+	for _, pl in Players:GetPlayers() do
+		cur.joined[pl] = cur.startedAt -- everyone here at the start counts from the start
+	end
 	current = cur
 
 	for _, slot in slots do
@@ -987,19 +1007,46 @@ finish = function(success: boolean, damage: { [Player]: number }?, fallen: numbe
 		if S.ChaosService then
 			fine, flags = S.ChaosService.Fines(cur.cfg)
 		end
+		-- Fair share (EconomyService.PayShare): how many tasks each trade has on this job, and how long it ran.
+		local roleTotals: { [string]: number } = {}
+		for _, slot in cur.slots do
+			roleTotals[slot.def.Role] = (roleTotals[slot.def.Role] or 0) + 1
+		end
+		local nowClock = os.clock()
+		local jobSeconds = nowClock - cur.startedAt
 		local paidPlayers: { Player } = {}
 		for _, pl in Players:GetPlayers() do
 			local tasks = contributors[pl] or 0
 			local myDamage = if damage then damage[pl] or 0 else 0
-			local net = if tasks > 0 then math.max(0, pay - fine - myDamage) else 0
+			-- the trade this player mostly worked decides how many tasks a full paycheck needs
+			local mine: { [string]: number } = {}
+			local mainRole: string?, mainN = nil, 0
+			for _, id in S.QualityService.TasksOf(pl) do
+				local slot = cur.slots[id]
+				if slot then
+					local r = slot.def.Role
+					mine[r] = (mine[r] or 0) + 1
+					if mine[r] > mainN then
+						mainRole, mainN = r, mine[r]
+					end
+				end
+			end
+			local need = S.EconomyService.TasksForFullPay(cur.cfg, #cur.order, if mainRole then roleTotals[mainRole] or 0 else 0)
+			local share, shareWhy = S.EconomyService.PayShare(cur.cfg, tasks, need,
+				nowClock - (cur.joined[pl] or cur.startedAt), jobSeconds)
+			local gross = math.floor(pay * share + 0.5)
+			local net = if tasks > 0 then math.max(0, gross - fine - myDamage) else 0
 			-- 2x Pay game pass: the buyer's own paycheck only (EconomyService asks PurchaseService; 1 or 2, never more)
 			local boost = if net > 0 then S.EconomyService.PayBoost(pl) else 1
 			local earned = net * boost
 			local note: string? = nil
 			if earned > 0 then
 				S.EconomyService.AddCash(pl, earned, cur.bp.DisplayName .. " job")
-				table.insert(paidPlayers, pl)
-				S.ProgressionService.AwardJob(pl)
+				-- job XP and company points need at least half a fair share
+				if share >= 0.5 then
+					table.insert(paidPlayers, pl)
+					S.ProgressionService.AwardJob(pl)
+				end
 				S.DataService.RecordJob(pl, earned, S.QualityService.Grade(avg))
 				if S.DataService.MarkFirstPayout(pl) then
 					note = "First paycheck! Your own RV at the RV park is unlocked: next shift starts there."
@@ -1019,10 +1066,13 @@ finish = function(success: boolean, damage: { [Player]: number }?, fallen: numbe
 				pay = earned,
 				passBonus = earned - net, -- extra from the 2x Pay pass (0 without it)
 				tasks = tasks,
+				share = share, -- part of the paycheck earned (1 = all of it)
+				shareWhy = shareWhy, -- "tasks" or "late" when under 1
+				needTasks = need,
 				timeLeft = timeLeft,
-				fines = if tasks > 0 then math.min(fine, pay) else 0,
+				fines = if tasks > 0 then math.min(fine, gross) else 0,
 				finesCount = flags,
-				damage = if tasks > 0 then math.min(myDamage, math.max(0, pay - fine)) else 0,
+				damage = if tasks > 0 then math.min(myDamage, math.max(0, gross - fine)) else 0,
 				collapsed = fallen or 0,
 				note = note,
 			})
@@ -1214,7 +1264,11 @@ local function hookSiteButton(button: BasePart)
 				local cf = Job.SiteSpawn()
 				local c = p.Character
 				if cf and c and not S.TaskEngine.IsBusy(p) and not S.TaskEngine.Carry.Holding(p) then
-					c:PivotTo(cf * CFrame.new(math.random(-4, 4), 0, math.random(-3, 3)))
+					local to = cf * CFrame.new(math.random(-4, 4), 0, math.random(-3, 3))
+					c:PivotTo(to)
+					if S.MoveGuard then
+						S.MoveGuard.Snap(p, to.Position) -- the server moved them: that spot is trusted
+					end
 					Toast:FireClient(p, ("Crew shuttle: you're at Site %d. Pick a trade and help out!"):format(cur.tier))
 				end
 			else
@@ -1303,9 +1357,14 @@ function Job.Start()
 	if RunService:IsStudio() then
 		local hook = Instance.new("BindableFunction")
 		hook.Name = "DevTrigger"
-		hook.OnInvoke = function(playerName: string, prompt: ProximityPrompt)
+		-- Test scripts move the player around from the server, so by default the hook trusts where they stand.
+		-- keepPosition = true leaves the trusted spot alone (to test MoveGuard itself).
+		hook.OnInvoke = function(playerName: string, prompt: ProximityPrompt, keepPosition: boolean?)
 			local pl = Players:FindFirstChild(playerName)
 			if pl and pl:IsA("Player") then
+				if S.MoveGuard and not keepPosition then
+					S.MoveGuard.Snap(pl)
+				end
 				Job.Trigger(pl, prompt)
 				return true
 			end
@@ -1313,6 +1372,20 @@ function Job.Start()
 		end
 		hook.Parent = ServerStorage
 	end
+
+	-- Pay share by time: someone who joins while a job is running counts from now, not from the job's start.
+	Players.PlayerAdded:Connect(function(p)
+		local cur = current
+		if cur then
+			cur.joined[p] = os.clock()
+		end
+	end)
+	Players.PlayerRemoving:Connect(function(p)
+		local cur = current
+		if cur then
+			cur.joined[p] = nil
+		end
+	end)
 
 	Net.Event("Hello").OnServerEvent:Connect(function(p)
 		if S.TaskEngine.Guard.Allow(p, "Hello", 1) then

@@ -3,6 +3,9 @@
 Date: 2026-11-16. Branch: `purchase-service`. Read-only pass: no game code was changed for this document.
 (The purchase hardening listed at the end was done earlier, in the adversarial pass, and is committed separately.)
 
+**Update, later on 2026-11-16:** the owner asked for the three high findings to be fixed. H1, H2 and H3 below
+each end with a "Fixed" note saying what was done and what is left. The medium and low findings are unchanged.
+
 ## What was reviewed
 
 - Every remote. There are 17 client-to-server RemoteEvents and no RemoteFunctions (`Shared/Util/Net`):
@@ -22,9 +25,9 @@ Nothing here was tested against a live server. Findings come from reading the co
 
 | # | Severity | Finding |
 |---|---|---|
-| H1 | High | Character position is trusted for every reach check: a teleporting client finishes Place tasks instantly at 100% |
-| H2 | High | One finished task pays a full paycheck: late joiners and idlers can leech pay, XP and company points |
-| H3 | High | Anyone can take the free Foreman slot and kick players instantly, or refuse to start jobs |
+| H1 | High, fixed | Character position is trusted for every reach check: a teleporting client finishes Place tasks instantly at 100% |
+| H2 | High, fixed | One finished task pays a full paycheck: late joiners and idlers can leech pay, XP and company points |
+| H3 | High, fixed | Anyone can take the free Foreman slot and kick players instantly, or refuse to start jobs |
 | M1 | Medium | Every mini-game can be auto-played for top accuracy (the data needed is sent to the client) |
 | M2 | Medium | Trades can be switched every 0.5 s mid-job: one player can do every trade, and each switch resets a bot |
 | M3 | Medium | 2x Pay relies on Roblox refreshing its ownership cache when the purchase event fires: untested live |
@@ -58,6 +61,21 @@ Suggested fix: track each character on the server (distance moved per second aga
 pull back or ignore prompts when it is exceeded), and require a minimum time between `Carry.PickUp` and the
 matching Place equal to the distance divided by the carry speed.
 
+**Fixed (2026-11-16): `Services/MoveGuard`.** The server keeps a trusted spot per player that follows the
+character but moves no faster than the server-side walk speed times 1.3 (so carrying slows it too), with up to
+2.5 seconds of allowance that builds up while standing or lagging. `JobService.near` uses that spot for players,
+so slots, piles, truck loading and site buttons no longer believe the raw position. Riding in a seat counts when
+the player reached the seat honestly; the crew shuttle and the trip back to the RV tell the guard where the
+server put the player. Nobody is pulled back: a prompt simply does not work until the trusted spot arrives, with
+a message saying why.
+Measured in Studio: an honest walk stayed within 0.4 studs; a 300-stud teleport was trusted after 12.1 seconds
+(walking takes 18.8); a 118-stud teleport to a pile was refused for 5.1 seconds; riding 150 studs and the shuttle
+stayed at 0 lag.
+What is left: a cheater still gets up to 1.3 times walking speed and one 2.5-second burst (about 52 studs after
+standing still), which covers a short pile-to-slot hop about 25% sooner than walking. The dealer, tool shop and
+coffee counters still read the raw position; they only decide where a player may spend their own cash. Someone
+standing (not seated) on a moving truck falls behind and must wait a few seconds after stepping off.
+
 ### H2. One finished task pays a full paycheck
 
 Where: `JobService.finish` (`if tasks > 0 then pay ...`), `QualityService.Contributors`.
@@ -71,6 +89,17 @@ the same bar as any task).
 Suggested fix: scale pay by share of the job (for example full pay at 15% or more of a fair share of tasks, less
 below that), or require a minimum time on site.
 
+**Fixed (2026-11-16): `EconomyService.PayShare` and `TasksForFullPay`, used in `JobService.finish`.** A paycheck is
+now multiplied by the player's share, which is the smaller of two parts:
+- by work: tasks done out of the tasks needed for full pay. Needed = 10% of the job's tasks, never fewer than 3
+  or more than 10 (Shed 4, Starter House 7), or every task the player's main trade has on that job when that is
+  fewer, so a small trade that did all of its work is paid in full;
+- by time: a player on the server for less than half of the job is paid in proportion (joining at the end).
+Job XP and company points need a share of at least 50%. The numbers live in `ServerStorage/Config/Jobs`
+(`ShareTasks`, `ShareTasksMin`, `ShareTasksMax`, `SharePresent`). The payout panel shows the share and why.
+What is left: a player who is present from the start and does the needed handful of tasks, then idles, is still
+paid in full. That idler's own trade stalls unless they keep working, so the crew notices.
+
 ### H3. The Foreman slot gives an instant kick and control of job starts
 
 Where: `CrewService` `KickVote` (`roles[p] == "Foreman"` kicks at once) and `CanStartJobs`.
@@ -81,6 +110,17 @@ in CLAUDE.md ("Foreman can kick"), but on public servers it lets one player empt
 
 Suggested fix: give the instant kick only to the player who started the current job, add a cooldown and a
 per-session limit, and let the crew start a job by vote when the Foreman has not started one for a few minutes.
+
+**Fixed (2026-11-16): `CrewService`.** Nobody removes a player alone any more. A kick always takes at least two
+voters: with the Foreman among them one more crew member is enough, otherwise most of the rest of the crew as
+before (`Crew.VotesNeeded`). Votes now expire after 120 seconds. In a server of two, nobody can be kicked.
+The Foreman keeps the first say on starting a job for 90 seconds after the crew becomes free (server start or a
+job cleared); after that anyone may start one. The 90 seconds are counted from when the crew became free, so
+dropping and re-taking Foreman does not reset them.
+Tested: the vote rule as a function (1, 2 and 5 other players, with and without the Foreman). Not tested: a real
+kick or a real start after the grace period, which need two or more players.
+What is left: a Foreman with one accomplice can still remove players, and a Foreman can still delay each job
+start by up to 90 seconds.
 
 ## Medium
 

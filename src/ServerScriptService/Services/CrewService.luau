@@ -3,10 +3,14 @@
 -- Rule for small crews: if nobody holds a trade, anyone may do that trade's tasks (bots cover empty trades too).
 -- Crew tools (all validated here):
 --  * Quick Join: the server picks the trade the crew needs most (your last trade first if it's free).
---  * Forming a crew: when a player is the Foreman, only they start jobs at the site board (JobService asks CanStartJobs).
+--  * Forming a crew: when a player is the Foreman, only they start jobs at the site board (JobService asks
+--    CanStartJobs). If no job has been started START_GRACE seconds after the crew became free, anyone may start one
+--    (security audit H3: a Foreman can't hold the crew up).
 --  * Pings: tap a preset ("Here", "Need help", "Bring lumber", "Watch out") and it shows a marker where you're
 --    looking for the whole crew. Rate limited, position checked against the sender.
---  * Kick: the Foreman removes a griefer right away; otherwise a majority of the rest of the crew votes them out.
+--  * Kick: always a vote of at least two people. With the Foreman among the voters one more crew member is enough;
+--    otherwise most of the rest of the crew. Votes count for KICK_VOTE_SECONDS. (Audit H3: the Foreman used to
+--    kick alone and at once, and the Foreman slot is first come, first served.)
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -77,17 +81,34 @@ function Crew.TryRestore(p: Player): string?
 	return last
 end
 
--- When a player holds Foreman, only the Foreman starts jobs (they "form the crew and pick the job tier").
+local START_GRACE = 90 -- seconds the Foreman has to start a job before anyone may
+local KICK_VOTE_SECONDS = 120 -- how long a kick vote counts
+local idleSince = os.clock() -- when the crew last became free to start a job (server start, or a job cleared)
+
+-- When a player holds Foreman, only the Foreman starts jobs (they "form the crew and pick the job tier"), for the
+-- first START_GRACE seconds the crew is free. After that anyone may: it's counted from when the crew became free,
+-- not from when the Foreman took the trade, so re-picking Foreman doesn't reset it.
 function Crew.CanStartJobs(p: Player): (boolean, string?)
 	if Crew.IsRoleHeld("Foreman") and roles[p] ~= "Foreman" then
-		return false, "The Foreman picks the job: ask them to tap a site button"
+		local left = START_GRACE - (os.clock() - idleSince)
+		if left > 0 then
+			return false, ("The Foreman picks the job: ask them to tap a site button (anyone can start in %d s)"):format(math.ceil(left))
+		end
 	end
 	return true, nil
 end
 
+-- Votes needed to remove a player. Never fewer than two people, the Foreman included.
+function Crew.VotesNeeded(others: number, foremanVoted: boolean): number
+	if foremanVoted then
+		return 2
+	end
+	return math.max(2, math.floor(others / 2) + 1)
+end
+
 local PINGS = { Here = true, Help = true, Lumber = true, Danger = true }
 local PING_RANGE = 300
-local votes: { [Player]: { [Player]: boolean } } = {}
+local votes: { [Player]: { [Player]: number } } = {} -- target -> voter -> when they voted
 
 local function setRole(p: Player, role: string)
 	roles[p] = role
@@ -120,6 +141,9 @@ end
 
 function Crew.Start()
 	local Toast = Net.Event("Toast")
+	S.JobService.Cleared.Event:Connect(function()
+		idleSince = os.clock()
+	end)
 	local PingShown = Net.Event("PingShown")
 
 	Net.Event("QuickJoin").OnServerEvent:Connect(function(p: Player)
@@ -168,28 +192,28 @@ function Crew.Start()
 		if not target or not target:IsA("Player") or target == p then
 			return
 		end
-		if roles[p] == "Foreman" then
-			Toast:FireAllClients(("%s was removed from the crew by the Foreman"):format(target.Name))
-			target:Kick("The Foreman removed you from the crew.")
-			return
-		end
+		local now = os.clock()
 		local v = votes[target] or {}
 		votes[target] = v
-		v[p] = true
-		local others = #Players:GetPlayers() - 1
-		local need = math.max(2, math.floor(others / 2) + 1)
-		local have = 0
-		for voter in v do
-			if voter.Parent == Players then
+		v[p] = now
+		local have, foremanVoted = 0, false
+		for voter, at in v do
+			if voter.Parent == Players and now - at <= KICK_VOTE_SECONDS then
 				have += 1
+				foremanVoted = foremanVoted or roles[voter] == "Foreman"
+			else
+				v[voter] = nil -- left, or the vote is too old
 			end
 		end
+		local need = Crew.VotesNeeded(#Players:GetPlayers() - 1, foremanVoted)
 		if have >= need then
 			votes[target] = nil
-			Toast:FireAllClients(("%s was voted out of the crew"):format(target.Name))
+			Toast:FireAllClients(if foremanVoted then ("%s was removed from the crew by the Foreman and the crew"):format(target.Name)
+				else ("%s was voted out of the crew"):format(target.Name))
 			target:Kick("Your crew voted to remove you.")
 		else
-			Toast:FireAllClients(("Vote to remove %s: %d/%d"):format(target.Name, have, need))
+			Toast:FireAllClients(("Vote to remove %s: %d/%d%s"):format(target.Name, have, need,
+				if foremanVoted then " (the Foreman needs one more crew member to agree)" else ""))
 		end
 	end)
 

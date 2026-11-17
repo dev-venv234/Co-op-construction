@@ -245,6 +245,12 @@ local function showPayout(d: { [string]: any })
 			if d.early then "Finished early: +25%" else "No early bonus",
 			("Your tasks: %d"):format(d.tasks or 0),
 		}
+		-- a paycheck is scaled by the share of the job you did (or by time, if you joined late)
+		if typeof(d.share) == "number" and d.share < 1 and (d.tasks or 0) > 0 then
+			local pct = math.floor(d.share * 100 + 0.5)
+			table.insert(lines, if d.shareWhy == "late" then ("Your share: %d%% (you joined this job late)"):format(pct)
+				else ("Your share: %d%% (%d of %d tasks for full pay)"):format(pct, d.tasks or 0, d.needTasks or 0))
+		end
 		if (d.collapsed or 0) > 0 then
 			table.insert(lines, ("Collapse: %d piece%s fell%s"):format(d.collapsed, if d.collapsed == 1 then "" else "s",
 				if (d.damage or 0) > 0 then (" - your work: -$%d"):format(d.damage) else ""))

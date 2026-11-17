@@ -82,4 +82,28 @@ function Economy.ComputePayout(cfg: any, avgAccuracy: number, timeLeft: number):
 	return math.floor(pay + 0.5), { base = cfg.BasePay, quality = quality, early = early }
 end
 
+-- Tasks a player needs for a full paycheck: a share of the job's size, or every task their trade has on this job
+-- when that is fewer (so a small trade that did all of its work is paid in full).
+function Economy.TasksForFullPay(cfg: any, jobTasks: number, tradeTasks: number): number
+	local bySize = math.clamp(math.floor(jobTasks * (cfg.ShareTasks or 0.1) + 0.5), cfg.ShareTasksMin or 3, cfg.ShareTasksMax or 10)
+	return math.max(1, if tradeTasks > 0 then math.min(bySize, tradeTasks) else bySize)
+end
+
+-- How much of the paycheck a player earned (security audit H2: one task used to pay in full).
+--  * by work: `tasks` out of `need` (see TasksForFullPay);
+--  * by time: on the server for less than SharePresent of the job pays in proportion (joining at the end).
+-- The smaller one counts. Returns the share (0..1) and why it is under 1: "tasks", "late" or nil.
+function Economy.PayShare(cfg: any, tasks: number, need: number, presentSeconds: number, jobSeconds: number): (number, string?)
+	if tasks <= 0 then
+		return 0, "tasks"
+	end
+	local byTasks = math.clamp(tasks / math.max(1, need), 0, 1)
+	local fullAfter = math.max(1, jobSeconds * (cfg.SharePresent or 0.5))
+	local byTime = math.clamp(presentSeconds / fullAfter, 0, 1)
+	if byTime < byTasks then
+		return byTime, "late"
+	end
+	return byTasks, if byTasks < 1 then "tasks" else nil
+end
+
 return Economy

@@ -12,6 +12,7 @@ local ORDER = {
 	"DataService",
 	"ProgressionService",
 	"QualityService",
+	"MoveGuard",
 	"CrewService",
 	"VehicleService",
 	"EquipmentService",
