@@ -523,6 +523,69 @@ The owner also pulled in two more trades, Welder and HVAC, and a tool shop on 20
     149 R$ = $5,000, 299 R$ = $11,000, 499 R$ = $20,000 (tune later). (5) Prices: Rush 39 R$, Pro 79 R$, Retry 35 R$,
     2x Pay 299 R$ (inside PLAN.md's ranges). (6) Mock purchases run only in Studio with the workspace attribute
     `DevMockPurchases` set, or through the server-only `ServerStorage.DevPurchase` test hook.
+    Added during the adversarial pass: (7) at most 2 hired pros per job; (8) Rush Delivery needs a trade first
+    (the delivery is credited to the buyer like any task); (9) no retry offer, and no wait, when the retry is not on
+    sale and nobody on the server has one saved.
+  * **Final summary (2026-11-16). Nothing can be bought yet: every id in `Config/Products` is a placeholder (0).**
+  * **What was built** (10 commits on `purchase-service`, one per piece; `main` untouched, nothing pushed):
+    - `ServerStorage/Config/Products` (authoritative): 3 boosts, 4 cash packs, the 2x Pay pass; `Id = 0` = not on sale.
+    - `DataService` profile v6: `Receipts` (granted purchase ids, newest 150), `Credits` (paid boosts not used yet),
+      `RobuxSpent`. `Data.Save` now returns (ok, why) and is true only when the profile was written under this
+      server's session lock; `CanPersist`; no ordinary save once a player is leaving or the server is closing.
+    - `PurchaseService`: the one `ProcessReceipt` handler (grant in memory + record the id, save, then
+      PurchaseGranted; NotProcessedYet for an unknown product, absent buyer, unloaded or unsavable profile, failed
+      save). Remote `Purchase` (Open / Buy + key; 0.5 s / 1 s limits) and `PurchaseData` (catalog). The server opens
+      the prompt itself. Player attributes `Credits` (JSON) and `DoublePay` are display copies.
+    - 2x Pay: asked from Roblox on join (retrying until answered) and after `PromptGamePassPurchaseFinished`, never
+      from that event's flag alone; not saved in the profile. `EconomyService.PayBoost(p)` returns 1 or 2 and
+      `JobService.finish` multiplies the net paycheck; payout field `passBonus`, panel line "2x Pay pass: +$N".
+    - Cash packs: `EconomyService.AddCash` (now returns whether it added).
+    - Rush Delivery: `JobService.CanRush` / `RushDelivery(buyer)` = the bookkeeping of the last unload (piles, truck
+      emptied, Deliver slot completed for the buyer). Bundles still flying into the truck stop.
+    - Hire a Pro: `BotService.CanHirePro` / `HirePro(buyer)`. The empty trade with the most work left gets a pro
+      (16 walk speed, 0.3-0.6 s pauses, tap spread 0.1, weld 0.9-1.0, gauge 0.92-1.0, machine aim 0.6 studs, gold
+      hard hat, "Pro <Trade>"). Same slot rules and task engine. Stays if a player takes that trade; gone on cleanup.
+    - Retry Inspection: `InspectionService` `CanRetry` / `TakeRetry` / `HoldRetry` / `ReleaseRetry`. After a walk
+      with collapses: 25 s offer (workspace attribute `RetryOfferUntil`; held up to 60 s once while a buyer is in the
+      prompt), then one `redo<n>_<id>` Timing slot per fallen piece for its trade, up to 180 s, then a second walk.
+      A rebuilt piece is put back and takes the rebuild's accuracy and builder; an unrebuilt piece stays down and is
+      charged as before. Max 2 retries per job. `JobService.DropSlot` and `SetPhaseNote` support it.
+    - Client `StoreController`: STORE button (left edge under the top bar, 96 x 44), panel with 8 rows (buttons
+      136 x 60: price, USE (n), OWNED or SOON), and a 64 px tall RETRY INSPECTION button with a countdown.
+    - `design/Security_Audit.md`: read-only audit of all 17 remotes, the economy and the payout (3 high, 6 medium,
+      6 low). The high ones are not purchase bugs: trusted character position, one task pays a full paycheck, and
+      the Foreman's instant kick. None is fixed yet.
+  * **What was tested** (Studio, mock receipts through the real handler; real purchases can't run in Studio):
+    - Receipts: fresh, replayed id, save failing twice then working (one grant), unknown product, buyer not in the
+      server, profile not loaded, empty id, three copies of one receipt at once (one grant).
+    - Remote: unknown actions, wrong types, a 500-character key, 40 Buy calls at once: ignored or rate limited.
+    - No job: every boost refused before any prompt; receipts arriving anyway were saved as credits.
+    - Shed run 1: mock pass + Rush (deliver closed in 5 s) + Pro (Foreman) + 4 sloppy pours -> 4 collapsed -> retry
+      -> 4 rebuilds -> re-inspection passed -> $899 x 2 = $1,798 with the pass line on the panel.
+    - Shed run 2: saved credits used with no new purchase (Rush, 2 pros, retry); a third pro refused by the limit;
+      the pro stayed when the player took its trade; a second take of one offer refused; rebuilds left undone on
+      purpose -> after 3:00 the 4 pieces were still charged ($120, the same as the first result), $753 paid.
+    - Store panel: 8 rows, mock cash pack and pass update it, retry button text and countdown. No script errors.
+    - Studio and `src/` match on all 80 scripts (hash check); dev switches cleared.
+  * **What was NOT tested:** any real purchase or real receipt; real DataStores (Studio API access is off), so the
+    session-lock, failed-save and leaving-player paths ran only as simulations or not at all; redelivery on rejoin;
+    the pass bought in game (`PromptGamePassPurchaseFinished` + ownership check); the retry hold while a real prompt
+    is open; a second retry on one job; Hire a Pro on a house (machines, Welder, HVAC as the pro); two or more
+    players (who sees what, a crew member joining or leaving mid-boost was reasoned through, not run); the store on
+    a real phone. Screenshots are still unavailable, so the store has not been looked at on screen.
+  * **Creator Dashboard: what the owner must do before anything is on sale**
+    1. Monetization > Developer Products: create 7 products with these names and prices: Rush Delivery 39 R$,
+       Hire a Pro 79 R$, Retry Inspection 35 R$, Cash: Toolbox 49 R$, Cash: Truckload 149 R$, Cash: Payroll 299 R$,
+       Cash: Contractor 499 R$.
+    2. Monetization > Passes: create 1 pass, 2x Pay, 299 R$, and put it on sale.
+    3. Paste each id over `Id = 0` in `ServerStorage/Config/Products` (keys RushDelivery, HirePro, RetryInspection,
+       CashS, CashM, CashL, CashXL, DoublePay), in Studio and in `src/`. Keep `Cash` values whole numbers.
+    4. Game Settings > Security: enable Studio access to API services to test saving, then publish.
+    5. Test live with a second account: one cash pack (cash arrives once; rejoin and it is still there), one boost
+       with and without a job, and the pass (toast, doubled paycheck; a cancelled prompt grants nothing).
+
+- **Studio-only switch added:** `DevMockPurchases` (the store's Buy button runs a fake receipt). Same rule as the
+  others: Edit mode only, for a test, removed right after.
 
 ## Studio workflow notes (learned the hard way)
 - Seats auto-seat whoever touches them. Any seat with a trade rule must also check `Occupant` on the server and eject.
@@ -602,6 +665,7 @@ src/
 │  │     ├─ RoleControllers/     Foreman, Laborer, Operator, Electrician
 │  │     ├─ VehicleController    on-screen throttle/steer on touch
 │  │     ├─ PingController       tap-to-mark crew pings
+│  │     ├─ StoreController      Robux store panel and retry button (only asks; PurchaseService decides)
 │  │     ├─ OnboardingController arrows and tips
 │  │     └─ UIController         HUD, shop, job board, settings
 │  └─ StarterCharacterScripts/
