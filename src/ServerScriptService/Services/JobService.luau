@@ -290,6 +290,7 @@ local function snapshot(crew: any): { [string]: any }
 		s.total = total
 		s.phase = phase
 		s.sky = cur.sky
+		s.race = if S.LeagueService then S.LeagueService.RaceInfo(cur) else nil -- crew vs crew (LeagueService)
 	end
 	s.bots = if S.BotService and cur then S.BotService.Summary(cur) else {}
 	return s
@@ -325,7 +326,8 @@ local function board(): { [string]: any }
 	for _, key in SitesConfig.Order do
 		lots[key] = { free = #freeLots(key), total = #SitesConfig[key].Lots }
 	end
-	return { crews = list, lots = lots, maxCrews = S.CrewService.MAX_CREWS }
+	local league = if S.LeagueService then S.LeagueService.Standings() else {}
+	return { crews = list, lots = lots, maxCrews = S.CrewService.MAX_CREWS, league = league }
 end
 
 local pending = false
@@ -1233,6 +1235,8 @@ finish = function(cur: Current, success: boolean, damage: { [Player]: number }?,
 		local grade = Q.Grade(avg)
 		local pay, parts = S.EconomyService.ComputePayout(cur.cfg, avg, timeLeft)
 		local contributors = Q.Contributors(cur.quality)
+		-- crew vs crew: first of two racing crews to pass inspection gets extra pay (LeagueService; 0 otherwise)
+		local raceShare = if S.LeagueService then S.LeagueService.ClaimRace(cur) else 0
 		-- Surprise inspector: every flagged mistake nobody fixed comes off each paycheck.
 		local fine, flags = 0, 0
 		if S.ChaosService then
@@ -1280,7 +1284,8 @@ finish = function(cur: Current, success: boolean, damage: { [Player]: number }?,
 			local net = if tasks > 0 then math.max(0, gross - fine - myDamage) else 0
 			-- 2x Pay game pass: the buyer's own paycheck only (EconomyService asks PurchaseService; 1 or 2, never more)
 			local boost = if net > 0 then S.EconomyService.PayBoost(pl) else 1
-			local earned = net * boost
+			local race = if net > 0 then math.floor(net * raceShare + 0.5) else 0
+			local earned = net * boost + race
 			local note: string? = nil
 			if earned > 0 then
 				S.EconomyService.AddCash(pl, earned, cur.bp.DisplayName .. " job")
@@ -1306,7 +1311,8 @@ finish = function(cur: Current, success: boolean, damage: { [Player]: number }?,
 				early = parts.early,
 				base = parts.base,
 				pay = earned,
-				passBonus = earned - net, -- extra from the 2x Pay pass (0 without it)
+				passBonus = earned - net - race, -- extra from the 2x Pay pass (0 without it)
+				raceBonus = race, -- extra for winning a race against another crew (0 otherwise)
 				tasks = tasks,
 				share = share, -- part of the paycheck earned (1 = all of it)
 				shareWhy = shareWhy, -- "tasks" or "late" when under 1
@@ -1322,6 +1328,10 @@ finish = function(cur: Current, success: boolean, damage: { [Player]: number }?,
 		-- company points for everyone who was paid (CompanyService)
 		if S.CompanyService and #paidPlayers > 0 then
 			S.CompanyService.AddJob(paidPlayers, cur.cfg.BasePay, grade)
+		end
+		-- crew points on this server's standings
+		if S.LeagueService then
+			S.LeagueService.JobDone(cur, grade, parts.early == true)
 		end
 	else
 		for _, pl in members do

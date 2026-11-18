@@ -279,6 +279,9 @@ local function showPayout(d: { [string]: any })
 		if (d.finesCount or 0) > 0 then
 			table.insert(lines, ("Inspector fines: -$%d (%d unfixed)"):format(d.fines or 0, d.finesCount))
 		end
+		if (d.raceBonus or 0) > 0 then
+			table.insert(lines, ("Race won: +$%d"):format(d.raceBonus))
+		end
 		if (d.passBonus or 0) > 0 then
 			table.insert(lines, ("2x Pay pass: +$%d"):format(d.passBonus))
 		end
@@ -333,6 +336,21 @@ function UI.Start()
 		new("UISizeConstraint", { MaxSize = Vector2.new(520, 140) }),
 		new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }),
 	})
+
+	-- Race bar (crew vs crew, LeagueService): under the toasts while my crew races another crew
+	local raceBar = label("", {
+		Name = "RaceBar",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 246),
+		Size = UDim2.new(0.5, 0, 0, 30),
+		BackgroundTransparency = 0.1,
+		BackgroundColor3 = Color3.fromRGB(150, 40, 40),
+		Visible = false,
+		Parent = gui,
+	})
+	corner(8).Parent = raceBar
+	new("UISizeConstraint", { MaxSize = Vector2.new(460, 30), Parent = raceBar })
+	new("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4), Parent = raceBar })
 
 	-- Trade button (left, mid-height: above the thumbstick)
 	local tradeBtn = button("Pick trade", Color3.fromRGB(70, 90, 140), {
@@ -436,6 +454,26 @@ function UI.Start()
 		acc = 0
 		local s = UI.State
 		local crewName = if s.crew then tostring(s.crew.name) else nil
+		local race = if s.active and typeof(s.race) == "table" then s.race else nil
+		raceBar.Visible = race ~= nil
+		if race then
+			local rival = tostring(race.rival)
+			if race.result == "won" then
+				raceBar.Text = ("RACE WON vs %s! +20%% pay"):format(rival)
+				raceBar.BackgroundColor3 = Color3.fromRGB(40, 140, 70)
+			elseif race.result == "lost" then
+				raceBar.Text = ("%s won the race. Finish strong: full pay"):format(rival)
+				raceBar.BackgroundColor3 = Color3.fromRGB(70, 74, 86)
+			elseif race.rivalOut then
+				raceBar.Text = ("%s dropped out: pass inspection to win the race"):format(rival)
+				raceBar.BackgroundColor3 = Color3.fromRGB(40, 110, 170)
+			else
+				raceBar.Text = ("RACE vs %s  |  you %d/%d  |  them %d/%d"):format(rival, s.done or 0, s.total or 0,
+					race.theirDone or 0, race.theirTotal or 0)
+				local ahead = (s.done or 0) / math.max(s.total or 1, 1) >= (race.theirDone or 0) / math.max(race.theirTotal or 1, 1)
+				raceBar.BackgroundColor3 = if ahead then Color3.fromRGB(40, 120, 60) else Color3.fromRGB(150, 40, 40)
+			end
+		end
 		if s.active then
 			local left = math.max(0, (s.deadlineAt or 0) - workspace:GetServerTimeNow())
 			status.Text = ("%s %s  %d:%02d  |  %d/%d  |  %s"):format(

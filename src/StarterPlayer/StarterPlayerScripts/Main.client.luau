@@ -25,6 +25,7 @@ local list: { Instance } = {
 	RoleControllers:WaitForChild("PromptFilter"),
 	Controllers:WaitForChild("GuideController"),
 	Controllers:WaitForChild("CrewController"),
+	Controllers:WaitForChild("CrewTagController"),
 	Controllers:WaitForChild("SoundController"),
 	Controllers:WaitForChild("TrafficController"),
 	Controllers:WaitForChild("CompanyController"),

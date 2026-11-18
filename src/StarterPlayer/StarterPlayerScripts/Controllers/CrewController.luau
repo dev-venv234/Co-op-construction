@@ -286,6 +286,27 @@ function Crew.Start()
 			end
 		end
 
+		-- server standings (crew points: LeagueService)
+		local league = (UI.Board or {}).league or {}
+		local anyPoints = false
+		for _, st in league do
+			if (st.points or 0) > 0 then
+				anyPoints = true
+			end
+		end
+		if #league > 0 then
+			header("SERVER STANDINGS  -  finish jobs and win races for crew points")
+			for rank, st in league do
+				local r = row(34, if st.id == myId then Color3.fromRGB(40, 70, 55) else Color3.fromRGB(40, 41, 48))
+				local crown = if rank == 1 and anyPoints then "[#1] " else ("%d. "):format(rank)
+				text(r, ("%s%s  -  %d pts  |  %d job%s%s%s"):format(crown, tostring(st.name), st.points or 0, st.jobs or 0,
+					if (st.jobs or 0) == 1 then "" else "s", if st.best then "  |  best " .. tostring(st.best) else "",
+					if (st.wins or 0) > 0 then ("  |  %d race win%s"):format(st.wins, if st.wins == 1 then "" else "s") else ""),
+					UDim2.new(0, 10, 0, 5), UDim2.new(1, -20, 1, -10), Enum.Font.GothamBold,
+					if rank == 1 and anyPoints then Color3.fromRGB(255, 210, 90) else Color3.new(1, 1, 1))
+			end
+		end
+
 		-- every crew on the server
 		local board = UI.Board or {}
 		local crews = board.crews or {}

@@ -638,8 +638,9 @@ The owner also pulled in two more trades, Welder and HVAC, and a tool shop on 20
 
 - **Several crews per server (2026-11-17, branch `multi-crew`, owner: "dont we need more lots/sites like do 5-8
   companies per server?"; owner left the numbers to me):** up to **6 crews** a server (`CrewService.MAX_CREWS`), up to
-  6 players each (`MAX_MEMBERS`); each crew runs its own job on its own lot at the same time. Recommended server size
-  in Game Settings: about 30 (owner to set; the place is at 60, so crews can fill up and late joiners wait for room).
+  6 players each (`MAX_MEMBERS`); each crew runs its own job on its own lot at the same time. Server size set to 30
+  on 2026-11-17 (Creator Dashboard > place > Access > Maximum Visitor Count; was 50). Scripts can't change it
+  (Players.MaxPlayers is read-only) and Open Cloud `universe.place:write` isn't granted.
   * **Crews (`CrewService`, rewritten):** crew = { id 1..6, name, companyId, members, roles, idleSince, votes, barred }.
     Picking a trade without a crew puts you in your company's crew on the server (if it has room), else a new crew of
     your own (bots fill the other trades), else (6 crews already) the crew with room that needs your trade. Name: the
@@ -682,6 +683,23 @@ The owner also pulled in two more trades, Welder and HVAC, and a tool shop on 20
     inside their lots, screenshots OK. **Not tested:** two crews at the same time (Studio here runs one player:
     needs a Team Test / live server with 2+ players), another crew's prompts being hidden, two trucks loading at once,
     company crews, kick votes, phone performance with several jobs and their bots running.
+
+- **Crew vs crew (2026-11-17, owner: "its still co op in your team/company/crew but your competing against other
+  crews"):** `LeagueService` (new, server). Co-op inside a crew, competition between crews on the same server.
+  * Crew points per passed job: round(BasePay / 100 x grade mult (A+ 1.5, A 1.3, B 1.1, C 1, D 0.8)) + 2 if early
+    + 5 for a race win (shed A = 7, starter house A = 20). Kept per crew while it exists on the server. Standings
+    go out with the crew board (`Crews` remote, field `league`) and show at the top of the CREW panel. The leading
+    crew gets player attribute `TopCrew` (gold "#1" tag) and the server is told when the lead changes.
+  * Races: a crew starting the same site (tier key) as another crew within 90 s is paired with it (`cur.race`). The
+    first to pass inspection wins: `JobService.finish` asks `LeagueService.ClaimRace(cur)` before payout, and each
+    paid member gets +20% of their net paycheck (`raceBonus` on the payout screen; not doubled by the 2x pass). The
+    loser gets normal pay. A rival that fails or leaves drops out; the other wins by passing. HUD race bar (under the
+    toasts, y 246): "RACE vs Crew 2 | you 12/36 | them 9/36", green when ahead (`state.race` from `RaceInfo`).
+  * `CrewTagController` (client, new): crew name over other players' heads in the crew's color, gold "#1" for the
+    leading crew.
+  * Tested: LeagueService unit test with stand-in crews/jobs (pairing, 90 s window, one bonus per race, points,
+    standings order, drop-out win) all pass; in-game the standings reach clients and a job starts with no errors.
+    **Not tested:** a real race with two crews, and the race bonus on a real payout (needs 2+ players).
 
 ## Studio workflow notes (learned the hard way)
 - BindableEvents copy any table passed through them (a listener gets a copy, not the same table). Pass tables between
