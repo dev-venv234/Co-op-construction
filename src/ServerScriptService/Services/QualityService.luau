@@ -1,27 +1,28 @@
 --!strict
--- Per-task accuracy (0..1, decided by the server) rolled up into a job grade.
+-- Per-task accuracy (0..1, decided by the server) rolled up into a job grade. Each job keeps its own records
+-- (JobService: cur.quality = Quality.New()), so crews working at the same time never mix grades.
 local Quality = {}
 
-type Record = { player: Player, slotId: string, accuracy: number }
-local records: { Record } = {}
+export type Record = { player: Player, slotId: string, accuracy: number }
+export type Records = { Record }
 
-function Quality.Reset()
-	table.clear(records)
+function Quality.New(): Records
+	return {}
 end
 
-function Quality.Record(p: Player, slotId: string, accuracy: number)
-	table.insert(records, { player = p, slotId = slotId, accuracy = math.clamp(accuracy, 0, 1) })
+function Quality.Record(q: Records, p: Instance, slotId: string, accuracy: number)
+	table.insert(q, { player = p :: any, slotId = slotId, accuracy = math.clamp(accuracy, 0, 1) })
 end
 
-function Quality.Average(): number
-	if #records == 0 then
+function Quality.Average(q: Records): number
+	if #q == 0 then
 		return 0
 	end
 	local sum = 0
-	for _, r in records do
+	for _, r in q do
 		sum += r.accuracy
 	end
-	return sum / #records
+	return sum / #q
 end
 
 -- Chaos: rework records (loading, re-stacking, fixes, retry rebuilds, mishaps) are never flagged by the inspector.
@@ -31,9 +32,9 @@ local function isRework(id: string): boolean
 end
 
 -- The worst build tasks under `threshold` accuracy, lowest first (at most `limit`).
-function Quality.LowestFor(threshold: number, limit: number): { { slotId: string, accuracy: number } }
+function Quality.LowestFor(q: Records, threshold: number, limit: number): { { slotId: string, accuracy: number } }
 	local out = {}
-	for _, r in records do
+	for _, r in q do
 		if r.accuracy < threshold and not isRework(r.slotId) then
 			table.insert(out, { slotId = r.slotId, accuracy = r.accuracy })
 		end
@@ -48,8 +49,8 @@ function Quality.LowestFor(threshold: number, limit: number): { { slotId: string
 end
 
 -- A flagged task was redone: its record takes the new accuracy.
-function Quality.Replace(slotId: string, accuracy: number)
-	for _, r in records do
+function Quality.Replace(q: Records, slotId: string, accuracy: number)
+	for _, r in q do
 		if r.slotId == slotId then
 			r.accuracy = math.clamp(accuracy, 0, 1)
 		end
@@ -57,8 +58,8 @@ function Quality.Replace(slotId: string, accuracy: number)
 end
 
 -- The record for one task (who did it and how well), or nil.
-function Quality.RecordOf(slotId: string): Record?
-	for _, r in records do
+function Quality.RecordOf(q: Records, slotId: string): Record?
+	for _, r in q do
 		if r.slotId == slotId then
 			return r
 		end
@@ -67,9 +68,9 @@ function Quality.RecordOf(slotId: string): Record?
 end
 
 -- The slot ids of every task this worker has on record (the payout uses them to see which trade they worked).
-function Quality.TasksOf(p: Instance): { string }
+function Quality.TasksOf(q: Records, p: Instance): { string }
 	local out = {}
-	for _, r in records do
+	for _, r in q do
 		if (r.player :: any) == p then
 			table.insert(out, r.slotId)
 		end
@@ -77,9 +78,9 @@ function Quality.TasksOf(p: Instance): { string }
 	return out
 end
 
-function Quality.Contributors(): { [Player]: number }
+function Quality.Contributors(q: Records): { [Player]: number }
 	local out: { [Player]: number } = {}
-	for _, r in records do
+	for _, r in q do
 		out[r.player] = (out[r.player] or 0) + 1
 	end
 	return out

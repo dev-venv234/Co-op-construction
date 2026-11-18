@@ -62,7 +62,7 @@ local function nearest(ok: (ProximityPrompt) -> boolean): ProximityPrompt?
 	local from = if r then r.Position else Vector3.zero
 	local best, bestD = nil, math.huge
 	for pp in prompts do
-		if pp.Parent and ok(pp) then
+		if pp.Parent and not UI.Foreign(pp) and ok(pp) then
 			local pos = posOf(pp)
 			if pos then
 				local d = (pos - from).Magnitude
@@ -125,9 +125,9 @@ local function objective(): (string, ProximityPrompt?)
 		local far = slot == nil or (r ~= nil and ((posOf(slot) :: Vector3) - r.Position).Magnitude > 250)
 		if far then
 			local btn = nearest(function(pp)
-				return pp.Parent ~= nil and (pp.Parent :: Instance):GetAttribute("StartSite") == "Site_T" .. tostring(st.site)
+				return pp.Parent ~= nil and (pp.Parent :: Instance):GetAttribute("StartSite") == st.siteKey
 			end)
-			return ("The crew is at Site %s: tap the Site %s button on the JOB SITES board to ride out"):format(tostring(st.site), tostring(st.site)), btn
+			return ("Your crew is at %s: tap the Site %s button on the JOB SITES board to ride out"):format(tostring(st.lot), tostring(st.site)), btn
 		end
 	end
 	-- Trades a bot is covering: don't send the player to do their work.
@@ -197,7 +197,8 @@ local function objective(): (string, ProximityPrompt?)
 		local crane: Instance? = nil
 		if machine == "Crane" then
 			for _, site in workspace:GetChildren() do
-				if string.sub(site.Name, 1, 8) == "JobSite_" and site:FindFirstChild("Crane") then
+				if string.sub(site.Name, 1, 8) == "JobSite_" and site:GetAttribute("CrewId") == player:GetAttribute("CrewId")
+					and site:FindFirstChild("Crane") then
 					crane = site:FindFirstChild("Crane")
 				end
 			end

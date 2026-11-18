@@ -7,6 +7,8 @@
 --    TimingTask.JudgeAt / ConnectTask.Accuracy. Only the tap is simulated (with aim error, so they miss sometimes).
 --  * Slower: 75% walk speed, a pause between tasks, slower wiring puzzles.
 --  * When a player picks a trade, that trade's bot clocks out. Bots never get paid or earn XP.
+--  * Each crew's job has its own bots (2026-11-17, several crews per server): a bot belongs to one job, works only
+--    that job's site and machines, and goes when that job is cleared.
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
@@ -25,7 +27,11 @@ type Bot = {
 	alive: boolean,
 	seat: BasePart?,
 	pro: boolean?, -- hired through the store (Hire a Pro): faster and more accurate, for this job only
+	cur: any, -- the job (JobService) this bot works on
 }
+
+-- Per job: its bots, the trades with a hired pro, and the helper bots called in for a stalled trade.
+type State = { bots: { Bot }, proRole: { [string]: boolean }, helping: { [string]: number } }
 
 local SPEED_SCALE = 0.75 -- bots walk at 75% of player speed
 local AIM_SPREAD = 0.3 -- seconds of tap error (roughly 1 miss in 12 taps)
@@ -42,24 +48,30 @@ local SKINS = {
 }
 
 local S: any
-local bots: { Bot } = {}
 local rng = Random.new()
-local proRole: { [string]: boolean } = {} -- trades with a hired pro on this job
 -- Helper bots: a trade a player holds but hasn't worked for STALL_SECONDS while its work waits gets a bot until that
 -- player finishes a task of it again (CLAUDE.md: "no trade idle more than 1 minute"; an idle Operator used to stall
--- the Shed's roof). role -> os.clock() when the helper was called.
+-- the Shed's roof). helping: role -> os.clock() when the helper was called.
 local STALL_SECONDS = 60
-local helping: { [string]: number } = {}
 local folder: Folder
 
 function BotService.Init(services)
 	S = services
 end
 
--- How many bots work each trade right now (sent to clients for the trade picker).
-function BotService.Summary(): { [string]: number }
+local function stateOf(cur: any): State
+	local st = cur.botState
+	if not st then
+		st = { bots = {}, proRole = {}, helping = {} }
+		cur.botState = st
+	end
+	return st
+end
+
+-- How many bots work each trade on this job right now (sent to its crew for the trade picker).
+function BotService.Summary(cur: any): { [string]: number }
 	local out: { [string]: number } = {}
-	for _, b in bots do
+	for _, b in stateOf(cur).bots do
 		if b.alive then
 			out[b.role] = (out[b.role] or 0) + 1
 		end
@@ -177,7 +189,7 @@ function BotService.MakeBody(name: string, shirt: Color3, hat: Color3?, at: CFra
 	return model
 end
 
-local function spawnBot(role: string, at: CFrame): Bot?
+local function spawnBot(cur: any, role: string, at: CFrame): Bot?
 	local color = Trades.Info[role].Color
 	local model = BotService.MakeBody(role .. " (bot)", color, color, at)
 	if not model then
@@ -185,6 +197,7 @@ local function spawnBot(role: string, at: CFrame): Bot?
 	end
 	model.Name = role .. " Bot"
 	model:SetAttribute("Bot", true)
+	model:SetAttribute("CrewId", cur.crew.id)
 	model:SetAttribute("SpeedScale", SPEED_SCALE)
 	local hum = model:FindFirstChildOfClass("Humanoid") :: Humanoid
 	local root = model:FindFirstChild("HumanoidRootPart") :: BasePart
@@ -193,7 +206,7 @@ local function spawnBot(role: string, at: CFrame): Bot?
 	pcall(function()
 		root:SetNetworkOwner(nil)
 	end)
-	return { model = model, hum = hum, root = root, role = role, alive = true }
+	return { model = model, hum = hum, root = root, role = role, alive = true, cur = cur }
 end
 
 -- Also clears a seat the bot sat in by accident (seats grab whoever touches them), so it never gets stuck seated.
@@ -223,9 +236,10 @@ local function despawn(b: Bot)
 		end
 	end
 	b.model:Destroy()
-	local i = table.find(bots, b)
+	local list = stateOf(b.cur).bots
+	local i = table.find(list, b)
 	if i then
-		table.remove(bots, i)
+		table.remove(list, i)
 	end
 end
 
@@ -352,7 +366,7 @@ local function simulateTiming(pro: boolean?): number
 end
 
 local function operate(b: Bot, kind: string, slot: any): boolean
-	local rig = S.EquipmentService.Find(kind)
+	local rig = S.EquipmentService.Find(kind, b.cur.site)
 	if not rig or not rig.boardPart then
 		return false
 	end
@@ -384,9 +398,9 @@ end
 -- Bot Operator brings the truck onto the DELIVERY pad (only when it's already at the site; the crew
 -- drives it over from the RV park) and unloads it.
 local function deliver(b: Bot, slot: any): boolean
-	local cur = S.JobService.Current()
-	local truck = cur and cur.truck
-	if not truck or not S.JobService.LoadReady() then
+	local cur = b.cur
+	local truck = cur.truck
+	if not truck or not S.JobService.LoadReady(cur) then
 		return false
 	end
 	local pad = slot.part.Position
@@ -398,13 +412,12 @@ local function deliver(b: Bot, slot: any): boolean
 	end
 	driveTo(truck, pad, 6, 40)
 	leaveSeat(b)
-	return S.JobService.BotDeliver(b.model, slot)
+	return S.JobService.BotDeliver(cur, b.model, slot)
 end
 
--- Is any task for this machine still not done?
-local function machineWorkLeft(kind: string): boolean
-	local cur = S.JobService.Current()
-	if not cur then
+-- Is any task for this machine still not done on this job?
+local function machineWorkLeft(cur: any, kind: string): boolean
+	if not S.JobService.Live(cur) then
 		return false
 	end
 	for _, s in cur.slots do
@@ -421,7 +434,7 @@ local function runMachine(b: Bot, kind: string, slot: any): boolean
 	if not operate(b, kind, slot) then
 		return false
 	end
-	local ok, rig = S.JobService.BotBegin(b.model, b.role, slot)
+	local ok, rig = S.JobService.BotBegin(b.cur, b.model, b.role, slot)
 	if not ok or not rig then
 		return false
 	end
@@ -433,7 +446,7 @@ local function runMachine(b: Bot, kind: string, slot: any): boolean
 		return false
 	end
 	task.wait(if rig.kind == "Crane" then 1.5 else 0.6)
-	if rig.kind == "Excavator" and rig.vehicle and rig.home and not machineWorkLeft("Excavator") then
+	if rig.kind == "Excavator" and rig.vehicle and rig.home and not machineWorkLeft(b.cur, "Excavator") then
 		-- All holes dug: park it back where it started, clear of the house (the floor gets built over the holes
 		-- next, and a machine left inside the footprint gets wedged), then climb out.
 		driveTo(rig.vehicle, rig.home.Position, 4, 25)
@@ -444,8 +457,8 @@ end
 
 local function workOn(b: Bot, slot: any): boolean
 	local def = slot.def
-	local cur = S.JobService.Current()
-	if not cur then
+	local cur = b.cur
+	if not S.JobService.Live(cur) then
 		return false
 	end
 	if def.Kind == "Place" then
@@ -459,18 +472,18 @@ local function workOn(b: Bot, slot: any): boolean
 				return false
 			end
 			walkTo(b, pile.Position, 6)
-			if not S.JobService.BotPickUp(b.model, def.Item) then
+			if not S.JobService.BotPickUp(cur, b.model, def.Item) then
 				return false
 			end
 		end
 		walkTo(b, standFor(b, slot), 4)
-		return S.JobService.BotPlace(b.model, b.role, slot)
+		return S.JobService.BotPlace(cur, b.model, b.role, slot)
 	elseif def.Kind == "Timing" or def.Kind == "Connect" or def.Kind == "Inspect" or def.Kind == "Trace" or def.Kind == "Gauge" then
 		if def.Equipment then
 			return runMachine(b, def.Equipment, slot)
 		end
 		walkTo(b, standFor(b, slot), 4)
-		local ok, rig = S.JobService.BotBegin(b.model, b.role, slot)
+		local ok, rig = S.JobService.BotBegin(cur, b.model, b.role, slot)
 		if not ok then
 			return false
 		end
@@ -504,10 +517,10 @@ local function workOn(b: Bot, slot: any): boolean
 			S.JobService.BotAbort(b.model, slot, rig)
 			return false
 		end
-		S.JobService.BotFinish(b.model, slot, acc, rig)
+		S.JobService.BotFinish(cur, b.model, slot, acc, rig)
 		if rig then
 			task.wait(if rig.kind == "Crane" then 3.2 else 0.6) -- let the machine finish its motion
-			if rig.kind == "Excavator" and rig.vehicle and rig.home and not machineWorkLeft("Excavator") then
+			if rig.kind == "Excavator" and rig.vehicle and rig.home and not machineWorkLeft(cur, "Excavator") then
 				-- All holes dug: park it back where it started, clear of the house (the floor gets built over the
 				-- holes next, and a machine left inside the footprint gets wedged), then climb out.
 				driveTo(rig.vehicle, rig.home.Position, 4, 25)
@@ -523,13 +536,13 @@ end
 
 local function brain(b: Bot)
 	while b.alive do
-		local cur = S.JobService.Current()
-		if not cur or cur.finishing then
+		local cur = b.cur
+		if not S.JobService.Live(cur) or cur.finishing then
 			task.wait(1)
 			continue
 		end
 		local did = false
-		for _, slot in S.JobService.OpenSlotsFor(b.role, b.root.Position) do
+		for _, slot in S.JobService.OpenSlotsFor(cur, b.role, b.root.Position) do
 			if not b.alive then
 				break
 			end
@@ -566,8 +579,8 @@ local function makePro(b: Bot)
 	end
 end
 
-local function hasPro(role: string): boolean
-	for _, b in bots do
+local function hasPro(cur: any, role: string): boolean
+	for _, b in stateOf(cur).bots do
 		if b.alive and b.pro and b.role == role then
 			return true
 		end
@@ -575,33 +588,33 @@ local function hasPro(role: string): boolean
 	return false
 end
 
-local function wanted(): { [string]: number }
+local function wanted(cur: any): { [string]: number }
 	local out: { [string]: number } = {}
-	local cur = S.JobService.Current()
-	if not cur or cur.finishing then
+	if not S.JobService.Live(cur) or cur.finishing then
 		return out
 	end
-	local crew = S.CrewService.Snapshot()
+	local st = stateOf(cur)
+	local crew = S.CrewService.Snapshot(cur.crew)
 	for _, role in Trades.Order do
-		if #(crew[role] or {}) == 0 and S.JobService.UsesRole(role) then
+		if #(crew[role] or {}) == 0 and S.JobService.UsesRole(cur, role) then
 			out[role] = if role == "Laborer" and cur.tier >= 3 then 2 else 1
 		end
 	end
 	-- a hired pro stays for the whole job, even if a player picks that trade later (it was paid for)
-	for role in proRole do
+	for role in st.proRole do
 		out[role] = math.max(out[role] or 0, 1)
 	end
 	-- a trade a player holds but isn't working: a helper until that player works it again
-	for role in S.JobService.StalledRoles(STALL_SECONDS) do
-		if #(crew[role] or {}) > 0 and not helping[role] then
-			helping[role] = os.clock()
-			Net.Event("Toast"):FireAllClients(("The %s work sat untouched for a minute: a bot is helping until the %s gets back to it"):format(
+	for role in S.JobService.StalledRoles(cur, STALL_SECONDS) do
+		if #(crew[role] or {}) > 0 and not st.helping[role] then
+			st.helping[role] = os.clock()
+			S.JobService.Toast(cur, ("The %s work sat untouched for a minute: a bot is helping until the %s gets back to it"):format(
 				role, role))
 		end
 	end
-	for role, since in helping do
-		if #(crew[role] or {}) == 0 or S.JobService.PlayerWorkedSince(role, since) then
-			helping[role] = nil -- the player is back on it (or left the trade: the normal rule covers that)
+	for role, since in st.helping do
+		if #(crew[role] or {}) == 0 or S.JobService.PlayerWorkedSince(cur, role, since) then
+			st.helping[role] = nil -- the player is back on it (or left the trade: the normal rule covers that)
 		else
 			out[role] = math.max(out[role] or 0, 1)
 		end
@@ -609,42 +622,45 @@ local function wanted(): { [string]: number }
 	return out
 end
 
-local function reconcile()
-	local want = wanted()
+local function reconcile(cur: any)
+	if not cur then
+		return
+	end
+	local st = stateOf(cur)
+	local want = wanted(cur)
 	local have: { [string]: number } = {}
-	for _, b in bots do
+	for _, b in st.bots do
 		have[b.role] = (have[b.role] or 0) + 1
 	end
-	local Toast = Net.Event("Toast")
 	local changed = false
 	-- regular bots clock out before a pro does
 	for pass = 1, 2 do
-		for i = #bots, 1, -1 do
-			local b = bots[i]
+		for i = #st.bots, 1, -1 do
+			local b = st.bots[i]
 			if (b.pro == true) == (pass == 2) and (want[b.role] or 0) < (have[b.role] or 0) then
 				have[b.role] -= 1
-				Toast:FireAllClients(b.role .. " bot clocked out: a player took the job")
+				S.JobService.Toast(cur, b.role .. " bot clocked out: a player took the job")
 				despawn(b)
 				changed = true
 			end
 		end
 	end
-	local spawnCF = S.JobService.SiteSpawn()
+	local spawnCF = if S.JobService.Live(cur) then S.JobService.SiteSpawn(cur) else nil
 	if spawnCF then
 		for role, n in want do
 			for _ = (have[role] or 0) + 1, n do
-				local b = spawnBot(role, spawnCF * CFrame.new(rng:NextNumber(-6, 6), 0, rng:NextNumber(-4, 4)))
+				local b = spawnBot(cur, role, spawnCF * CFrame.new(rng:NextNumber(-6, 6), 0, rng:NextNumber(-4, 4)))
 				if b then
-					local asPro = proRole[role] == true and not hasPro(role)
+					local asPro = st.proRole[role] == true and not hasPro(cur, role)
 					if asPro then
 						makePro(b)
 					end
-					table.insert(bots, b)
+					table.insert(st.bots, b)
 					task.spawn(brain, b)
 					if asPro then
-						Toast:FireAllClients("The pro " .. role .. " is on site")
-					elseif not helping[role] then -- (a helper was already announced)
-						Toast:FireAllClients(role .. " bot joined the crew (it fills the empty trade)")
+						S.JobService.Toast(cur, "The pro " .. role .. " is on site")
+					elseif not st.helping[role] then -- (a helper was already announced)
+						S.JobService.Toast(cur, role .. " bot joined the crew (it fills the empty trade)")
 					end
 					changed = true
 				end
@@ -656,24 +672,26 @@ local function reconcile()
 	end
 end
 
-local function clearAll()
-	for i = #bots, 1, -1 do
-		despawn(bots[i])
+local function clearAll(cur: any)
+	local st = stateOf(cur)
+	for i = #st.bots, 1, -1 do
+		despawn(st.bots[i])
 	end
-	table.clear(proRole) -- a pro is hired for one job
-	table.clear(helping)
+	table.clear(st.proRole) -- a pro is hired for one job
+	table.clear(st.helping)
 end
 
 ---------------------------------------------------------------------------------------------------------------
--- Hire a Pro (a paid boost, PurchaseService): a skilled bot takes an empty trade for the rest of this job.
+-- Hire a Pro (a paid boost, PurchaseService): a skilled bot takes an empty trade for the rest of the buyer's crew's
+-- job.
 ---------------------------------------------------------------------------------------------------------------
 
 -- The empty trade (no player on it, no pro yet) with the most unfinished work on this job.
-local function proCandidate(): string?
-	local cur = S.JobService.Current()
+local function proCandidate(cur: any): string?
 	if not cur or cur.finishing or cur.inspecting then
 		return nil
 	end
+	local st = stateOf(cur)
 	local left: { [string]: number } = {}
 	for _, slot in cur.slots do
 		if not slot.done then
@@ -682,15 +700,15 @@ local function proCandidate(): string?
 	end
 	local best: string?, bestN = nil, 0
 	for _, role in Trades.Order do
-		if not proRole[role] and not S.CrewService.IsRoleHeld(role) and (left[role] or 0) > bestN then
+		if not st.proRole[role] and not S.CrewService.IsRoleHeld(cur.crew, role) and (left[role] or 0) > bestN then
 			best, bestN = role, left[role]
 		end
 	end
 	return best
 end
 
-function BotService.CanHirePro(): (boolean, string?)
-	local cur = S.JobService.Current()
+function BotService.CanHirePro(p: Player): (boolean, string?)
+	local cur = S.JobService.ForPlayer(p)
 	if not cur or cur.finishing then
 		return false, "Start a job first: a pro is hired for one job"
 	end
@@ -698,13 +716,13 @@ function BotService.CanHirePro(): (boolean, string?)
 		return false, "The job is at final inspection: there's no work left for a pro"
 	end
 	local hired = 0
-	for _ in proRole do
+	for _ in stateOf(cur).proRole do
 		hired += 1
 	end
 	if hired >= MAX_PROS then
 		return false, ("This job already has %d pros: that's the limit"):format(MAX_PROS)
 	end
-	if not proCandidate() then
+	if not proCandidate(cur) then
 		return false, "No empty trade with work left: a pro takes a trade no player is on"
 	end
 	return true, nil
@@ -712,25 +730,27 @@ end
 
 -- Never yields. The pro replaces the regular bot on that trade (or joins now if the bots aren't on site yet).
 function BotService.HirePro(buyer: Player): (boolean, string?)
-	local ok, why = BotService.CanHirePro()
-	local role = proCandidate()
-	if not ok or not role then
+	local ok, why = BotService.CanHirePro(buyer)
+	local cur = S.JobService.ForPlayer(buyer)
+	local role = proCandidate(cur)
+	if not ok or not role or not cur then
 		return false, why
 	end
-	proRole[role] = true
+	local st = stateOf(cur)
+	st.proRole[role] = true
 	local upgraded = false
-	for _, b in bots do
+	for _, b in st.bots do
 		if b.alive and b.role == role and not b.pro then
 			makePro(b)
 			upgraded = true
 			break
 		end
 	end
-	Net.Event("Toast"):FireAllClients(("%s HIRED A PRO %s for this job!"):format(buyer.Name, string.upper(role)))
+	S.JobService.Toast(cur, ("%s HIRED A PRO %s for this job!"):format(buyer.Name, string.upper(role)))
 	if upgraded then
 		S.JobService.Broadcast()
 	else
-		task.defer(reconcile) -- no bot on that trade yet: bring the pro in
+		task.defer(reconcile, cur) -- no bot on that trade yet: bring the pro in
 	end
 	return true, nil
 end
@@ -739,22 +759,26 @@ function BotService.Start()
 	folder = Instance.new("Folder")
 	folder.Name = "CrewBots"
 	folder.Parent = workspace
-	S.JobService.Started.Event:Connect(function()
-		task.delay(START_GRACE, reconcile)
+	S.JobService.Started.Event:Connect(function(cur)
+		task.delay(START_GRACE, reconcile, cur)
 	end)
 	S.JobService.Cleared.Event:Connect(clearAll)
-	S.CrewService.Changed.Event:Connect(function()
-		task.defer(reconcile)
+	S.CrewService.Changed.Event:Connect(function(crew)
+		local cur = S.JobService.Of(crew)
+		if cur and os.clock() - cur.startedAt >= START_GRACE then
+			task.defer(reconcile, cur)
+		end
 	end)
-	-- every few seconds during a job: notices a trade that has stalled (helper bots), and when its player is back
+	-- every few seconds during each job: notices a trade that has stalled (helper bots), and when its player is back
 	task.spawn(function()
 		while true do
 			task.wait(5)
-			local cur = S.JobService.Current()
-			if cur and not cur.finishing and os.clock() - cur.startedAt >= START_GRACE then
-				local ok, err = pcall(reconcile)
-				if not ok then
-					warn("[Bots] reconcile:", err)
+			for _, cur in S.JobService.All() do
+				if not cur.finishing and os.clock() - cur.startedAt >= START_GRACE then
+					local ok, err = pcall(reconcile, cur)
+					if not ok then
+						warn("[Bots] reconcile:", err)
+					end
 				end
 			end
 		end

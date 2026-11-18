@@ -31,15 +31,15 @@ local SHED_PALETTES = {
 }
 
 type Job = { cur: any, palette: any, center: Vector3, shed: boolean, rng: Random }
-local job: Job? = nil
+-- (kept on the job itself, cur.detail: several crews build at once)
 
 function Detail.Init(services)
 	S = services
 end
 
 local function jobFor(cur: any): Job
-	local j = job
-	if j and j.cur == cur then
+	local j = cur.detail
+	if j then
 		return j
 	end
 	local shed = cur.bp and cur.bp.Id == "Shed"
@@ -55,7 +55,7 @@ local function jobFor(cur: any): Job
 	end
 	local center = if n > 0 then sum / n else cur.originCF.Position
 	local nj: Job = { cur = cur, palette = list[rng:NextInteger(1, #list)], center = center, shed = shed, rng = rng }
-	job = nj
+	cur.detail = nj
 	return nj
 end
 

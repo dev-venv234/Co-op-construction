@@ -11,8 +11,10 @@ local Trades = require(ReplicatedStorage.Shared.Config.Trades)
 local Input = require(script.Parent.InputController)
 
 local UI = {}
-UI.State = { active = false, roles = {} } :: { [string]: any }
+UI.State = { active = false, roles = {} } :: { [string]: any } -- my crew's state (JobService)
 UI.StateChanged = Instance.new("BindableEvent")
+UI.Board = { crews = {}, lots = {} } :: { [string]: any } -- every crew on the server (JobService "Crews")
+UI.BoardChanged = Instance.new("BindableEvent")
 
 local player = Players.LocalPlayer
 local gui: ScreenGui
@@ -73,6 +75,25 @@ local function button(text: string, color: Color3, props: { [string]: any }): Te
 		PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6),
 	}) })
 	return b
+end
+
+-- The crew that owns the job site this instance belongs to (its truck, machines, slots and piles), if any.
+function UI.SiteCrewOf(inst: Instance): number?
+	local a = inst.Parent
+	while a and a ~= workspace do
+		if string.sub(a.Name, 1, 8) == "JobSite_" then
+			local id = a:GetAttribute("CrewId")
+			return if typeof(id) == "number" then id else nil
+		end
+		a = a.Parent
+	end
+	return nil
+end
+
+-- Does this belong to another crew's job? (Display only: the server checks the crew on every prompt.)
+function UI.Foreign(inst: Instance): boolean
+	local id = UI.SiteCrewOf(inst)
+	return id ~= nil and id ~= player:GetAttribute("CrewId")
 end
 
 function UI.MyRole(): string?
@@ -398,6 +419,12 @@ function UI.Start()
 		end
 	end)
 	Net.Event("Payout").OnClientEvent:Connect(showPayout)
+	Net.Event("Crews").OnClientEvent:Connect(function(b)
+		if typeof(b) == "table" then
+			UI.Board = b
+			UI.BoardChanged:Fire(b)
+		end
+	end)
 
 	-- Countdown text
 	local acc = 0
@@ -408,13 +435,20 @@ function UI.Start()
 		end
 		acc = 0
 		local s = UI.State
+		local crewName = if s.crew then tostring(s.crew.name) else nil
 		if s.active then
 			local left = math.max(0, (s.deadlineAt or 0) - workspace:GetServerTimeNow())
-			status.Text = ("%s  %d:%02d  |  %d/%d done  |  %s"):format(
-				string.upper(s.job or ""), left // 60, math.floor(left % 60), s.done or 0, s.total or 0, s.phase or "")
+			status.Text = ("%s %s  %d:%02d  |  %d/%d  |  %s"):format(
+				string.upper(s.job or ""), tostring(s.lot or ""), left // 60, math.floor(left % 60), s.done or 0, s.total or 0, s.phase or "")
 			status.TextColor3 = if left < 60 then Color3.fromRGB(255, 120, 100) else WHITE
+		elseif crewName and UI.MyRole() then
+			status.Text = crewName .. ": grab a coffee, then pick a site at the truck lot board"
+			status.TextColor3 = WHITE
+		elseif crewName then
+			status.Text = crewName .. ": tap 'Pick trade' to choose your job"
+			status.TextColor3 = WHITE
 		else
-			status.Text = if UI.MyRole() then "Grab a coffee, then pick a site at the truck lot board" else "Tap 'Pick trade' to choose your job"
+			status.Text = "Tap 'Pick trade' to get on a crew (or JOIN one from CREW)"
 			status.TextColor3 = WHITE
 		end
 	end)

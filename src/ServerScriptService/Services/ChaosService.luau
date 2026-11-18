@@ -1,7 +1,9 @@
 --!strict
--- Chaos events (CLAUDE.md launch list), 1-2 per job, planned when the job starts:
+-- Chaos events (CLAUDE.md launch list), 1-2 per job, planned when the job starts. Each crew's job has its own plan
+-- (2026-11-17, several crews per server), and every message goes to that crew only:
 --  * Rain delay: starts when the first concrete pour opens. 45 s of no pouring (JobService asks Blocks), and the
---    mud slows every vehicle (VehicleService speed factor). Clients draw the rain and a countdown (RainUntil).
+--    mud slows that crew's vehicles (VehicleService speed factor). The crew's clients draw the rain, the dark sky
+--    and a countdown (player attribute RainUntil).
 --  * Surprise inspector: at 50% progress an inspector walks the site and red-flags the worst work (lowest task
 --    accuracy). Each flag adds a "Fix" task for that trade; every flag still unfixed at payout costs each paid
 --    player 5% of base pay ("every visible mistake costs money").
@@ -9,7 +11,6 @@
 --    a Laborer re-stacks it before the lift can be done again (JobService adds the rework task).
 -- First-time drop-in jobs get no chaos. Studio-only test switch: workspace attribute DevChaos = "All" or a list
 -- like "Rain,Inspector" forces those events (also on drop-in jobs).
-local Lighting = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
@@ -28,19 +29,34 @@ local INSPECTOR_STAYS = 25
 local EVENTS = { "Rain", "Inspector", "CraneMishap" }
 
 local S: any
-local Toast: RemoteEvent
 local rng = Random.new()
 
-local plan: { [string]: boolean } = {}
-local fired: { [string]: boolean } = {}
-local flags: { [string]: boolean } = {} -- flagged slot id -> still unfixed
-local token = 0 -- bumps every job, so delayed work from an old job does nothing
-local raining = false
-local inspector: Model? = nil
-local savedSky: { [string]: any }? = nil
+-- Per job (cur.chaos).
+type State = {
+	plan: { [string]: boolean },
+	fired: { [string]: boolean },
+	flags: { [string]: boolean }, -- flagged slot id -> still unfixed
+	raining: boolean,
+	rainUntil: number?,
+	inspector: Model?,
+	over: boolean, -- the job ended: delayed work does nothing
+}
 
 function Chaos.Init(services)
 	S = services
+end
+
+local function stateOf(cur: any): State
+	local st = cur.chaos
+	if not st then
+		st = { plan = {}, fired = {}, flags = {}, raining = false, rainUntil = nil, inspector = nil, over = false }
+		cur.chaos = st
+	end
+	return st
+end
+
+local function live(cur: any): boolean
+	return S.JobService.Live(cur) and not stateOf(cur).over
 end
 
 local function hasPour(bp: any): boolean
@@ -70,36 +86,38 @@ end
 -- Queries from JobService
 ---------------------------------------------------------------------------------------------------------------
 
-local startRain: () -> ()
+local startRain: (cur: any) -> ()
 
 -- Reason the slot can't be worked right now, or nil.
 -- A planned rain delay starts the moment anyone reaches for a pour, so no pour slips through first.
-function Chaos.Blocks(slot: any): string?
+function Chaos.Blocks(cur: any, slot: any): string?
 	if string.sub(slot.def.Id, 1, 5) ~= "pour_" then
 		return nil
 	end
-	if plan.Rain and not fired.Rain then
-		startRain()
+	local st = stateOf(cur)
+	if st.plan.Rain and not st.fired.Rain then
+		startRain(cur)
 	end
-	if raining then
+	if st.raining then
 		return "It's raining: no pouring concrete until it clears"
 	end
 	return nil
 end
 
 -- True once per job when a crane mishap is planned: this lift goes wrong.
-function Chaos.TakeCraneMishap(): boolean
-	if plan.CraneMishap and not fired.CraneMishap then
-		fired.CraneMishap = true
+function Chaos.TakeCraneMishap(cur: any): boolean
+	local st = stateOf(cur)
+	if st.plan.CraneMishap and not st.fired.CraneMishap then
+		st.fired.CraneMishap = true
 		return true
 	end
 	return false
 end
 
 -- Inspector fines: (amount per paid player, unfixed flags).
-function Chaos.Fines(cfg: any): (number, number)
+function Chaos.Fines(cur: any, cfg: any): (number, number)
 	local n = 0
-	for _, open in flags do
+	for _, open in stateOf(cur).flags do
 		if open then
 			n += 1
 		end
@@ -107,95 +125,46 @@ function Chaos.Fines(cfg: any): (number, number)
 	return n * math.floor(cfg.BasePay * FINE_SHARE + 0.5), n
 end
 
+-- A crewmate who joins mid-rain sees it too (CrewService.Changed).
+local function tagRain(cur: any)
+	local st = stateOf(cur)
+	for _, p in S.CrewService.Members(cur.crew) do
+		p:SetAttribute("RainUntil", if st.raining then st.rainUntil else nil)
+	end
+end
+
 ---------------------------------------------------------------------------------------------------------------
 -- Rain delay
 ---------------------------------------------------------------------------------------------------------------
 
-local function skyParts(): (Atmosphere, Clouds?)
-	local atmo = Lighting:FindFirstChildOfClass("Atmosphere")
-	if not atmo then
-		atmo = Instance.new("Atmosphere")
-		atmo.Parent = Lighting
-	end
-	return atmo :: Atmosphere, workspace.Terrain:FindFirstChildOfClass("Clouds")
-end
-
-local function setStorm(on: boolean)
-	local atmo, clouds = skyParts()
-	if on then
-		if savedSky then
-			return
-		end
-		savedSky = {
-			brightness = Lighting.Brightness,
-			density = atmo.Density,
-			haze = atmo.Haze,
-			color = atmo.Color,
-			clouds = clouds ~= nil,
-			cover = if clouds then clouds.Cover else 0,
-			cdensity = if clouds then clouds.Density else 0,
-			ccolor = if clouds then clouds.Color else Color3.new(1, 1, 1),
-		}
-		if not clouds then
-			clouds = Instance.new("Clouds")
-			clouds.Name = "RainClouds"
-			clouds.Parent = workspace.Terrain
-		end
-		Lighting.Brightness = Lighting.Brightness * 0.55
-		atmo.Density = math.max(atmo.Density, 0.45)
-		atmo.Haze = math.max(atmo.Haze, 2.5)
-		atmo.Color = Color3.fromRGB(150, 155, 165)
-		local c = clouds :: Clouds
-		c.Cover = 0.9
-		c.Density = 0.75
-		c.Color = Color3.fromRGB(110, 115, 125)
-	else
-		local sv = savedSky
-		if not sv then
-			return
-		end
-		savedSky = nil
-		Lighting.Brightness = sv.brightness
-		atmo.Density = sv.density
-		atmo.Haze = sv.haze
-		atmo.Color = sv.color
-		if clouds then
-			if sv.clouds then
-				clouds.Cover = sv.cover
-				clouds.Density = sv.cdensity
-				clouds.Color = sv.ccolor
-			else
-				clouds:Destroy()
-			end
-		end
-	end
-end
-
-local function stopRain(announce: boolean)
-	if not raining then
+local function stopRain(cur: any, announce: boolean)
+	local st = stateOf(cur)
+	if not st.raining then
 		return
 	end
-	raining = false
-	workspace:SetAttribute("RainUntil", nil)
-	S.VehicleService.SetSpeedFactor(1)
-	setStorm(false)
+	st.raining = false
+	st.rainUntil = nil
+	for _, p in S.CrewService.Members(cur.crew) do
+		p:SetAttribute("RainUntil", nil)
+	end
+	S.VehicleService.SetSpeedFactor(1, cur.site)
 	if announce then
-		Toast:FireAllClients("The rain stopped. Pour the concrete!")
+		S.JobService.Toast(cur, "The rain stopped. Pour the concrete!")
 		S.JobService.Broadcast()
 	end
 end
 
-startRain = function()
-	fired.Rain = true
-	raining = true
-	local my = token
-	workspace:SetAttribute("RainUntil", workspace:GetServerTimeNow() + RAIN_SECONDS)
-	S.VehicleService.SetSpeedFactor(MUD_FACTOR)
-	setStorm(true)
-	Toast:FireAllClients(("RAIN DELAY! No pouring concrete for %d s and the mud slows every vehicle. Keep working on the rest!"):format(RAIN_SECONDS))
+startRain = function(cur: any)
+	local st = stateOf(cur)
+	st.fired.Rain = true
+	st.raining = true
+	st.rainUntil = workspace:GetServerTimeNow() + RAIN_SECONDS
+	tagRain(cur)
+	S.VehicleService.SetSpeedFactor(MUD_FACTOR, cur.site)
+	S.JobService.Toast(cur, ("RAIN DELAY! No pouring concrete for %d s and the mud slows your vehicles. Keep working on the rest!"):format(RAIN_SECONDS))
 	task.delay(RAIN_SECONDS, function()
-		if token == my then
-			stopRain(true)
+		if live(cur) then
+			stopRain(cur, true)
 		end
 	end)
 end
@@ -227,7 +196,8 @@ local function walk(body: Model, pos: Vector3, timeout: number)
 end
 
 -- Red-flags a finished slot: red outline + FIX tag, and a Fix task for the same trade on the ground below it.
-local function flag(slot: any)
+local function flag(cur: any, slot: any)
+	local st = stateOf(cur)
 	local id = slot.def.Id
 	local marker = Instance.new("Folder")
 	marker.Name = "InspectorFlag_" .. id
@@ -257,9 +227,9 @@ local function flag(slot: any)
 	bb.Parent = marker
 	marker.Parent = slot.part.Parent
 
-	flags[id] = true
+	st.flags[id] = true
 	local p = slot.part.Position
-	S.JobService.AddSlot({
+	S.JobService.AddSlot(cur, {
 		Id = "fix_" .. id,
 		Kind = "Timing",
 		Role = slot.def.Role,
@@ -270,18 +240,18 @@ local function flag(slot: any)
 		Collide = false,
 		Reach = 12,
 	}, CFrame.new(p.X, 1.2, p.Z), marker, function()
-		if flags[id] then
-			flags[id] = false
-			S.QualityService.Replace(id, FIXED_ACCURACY)
-			Toast:FireAllClients("Fixed: " .. slot.def.Label .. " (no fine for that one)")
+		if st.flags[id] then
+			st.flags[id] = false
+			S.QualityService.Replace(cur.quality, id, FIXED_ACCURACY)
+			S.JobService.Toast(cur, "Fixed: " .. slot.def.Label .. " (no fine for that one)")
 		end
 	end)
 end
 
 local function startInspector(cur: any)
-	fired.Inspector = true
-	local my = token
-	local spawnCF = S.JobService.SiteSpawn()
+	local st = stateOf(cur)
+	st.fired.Inspector = true
+	local spawnCF = S.JobService.SiteSpawn(cur)
 	if not spawnCF then
 		return
 	end
@@ -311,23 +281,23 @@ local function startInspector(cur: any)
 		tag.Parent = head
 	end
 	body.Parent = workspace
-	inspector = body
+	st.inspector = body
 	local root = body:FindFirstChild("HumanoidRootPart") :: BasePart?
 	if root then
 		pcall(function()
 			root:SetNetworkOwner(nil)
 		end)
 	end
-	Toast:FireAllClients("SURPRISE INSPECTOR on site! Every visible mistake costs money: fix the red flags before payout")
+	S.JobService.Toast(cur, "SURPRISE INSPECTOR on site! Every visible mistake costs money: fix the red flags before payout")
 	Net.Cue("Whistle", spawnCF.Position)
 	local t0 = os.clock()
 
 	-- The worst finished work (machine tasks and the paperwork aren't "visible" mistakes).
 	local picks = {}
-	for _, r in S.QualityService.LowestFor(FLAG_BELOW, 12) do
+	for _, r in S.QualityService.LowestFor(cur.quality, FLAG_BELOW, 12) do
 		local slot = cur.slots[r.slotId]
 		if slot and slot.done and not slot.def.Equipment and slot.def.Kind ~= "Deliver" and slot.def.Kind ~= "Inspect"
-			and flags[r.slotId] == nil then
+			and st.flags[r.slotId] == nil then
 			table.insert(picks, slot)
 			if #picks >= MAX_FLAGS then
 				break
@@ -338,31 +308,31 @@ local function startInspector(cur: any)
 		walk(body, cur.originCF.Position, 10)
 	end
 	for _, slot in picks do
-		if token ~= my or not body.Parent then
+		if not live(cur) or not body.Parent then
 			return
 		end
 		walk(body, slot.part.Position, 10)
 		task.wait(1.2)
-		if token ~= my or S.JobService.Current() ~= cur or cur.finishing then
+		if not live(cur) or cur.finishing then
 			return
 		end
-		flag(slot)
+		flag(cur, slot)
 	end
 	if #picks == 0 then
-		Toast:FireAllClients("Inspector: clean work, no flags. Nice job crew!")
+		S.JobService.Toast(cur, "Inspector: clean work, no flags. Nice job crew!")
 	else
 		local fine = math.floor(cur.cfg.BasePay * FINE_SHARE + 0.5)
-		Toast:FireAllClients(("Inspector flagged %d mistake%s: -$%d each at payout unless fixed"):format(
+		S.JobService.Toast(cur, ("Inspector flagged %d mistake%s: -$%d each at payout unless fixed"):format(
 			#picks, if #picks == 1 then "" else "s", fine))
 	end
 	task.wait(math.max(2, INSPECTOR_STAYS - (os.clock() - t0)))
-	if token ~= my or not body.Parent then
+	if not live(cur) or not body.Parent then
 		return
 	end
 	local away = spawnCF.Position + spawnCF.LookVector * -30
 	walk(body, away, 6)
-	if inspector == body then
-		inspector = nil
+	if st.inspector == body then
+		st.inspector = nil
 	end
 	body:Destroy()
 end
@@ -371,31 +341,14 @@ end
 -- Planning and the watch loop
 ---------------------------------------------------------------------------------------------------------------
 
-local function reset()
-	token += 1
-	stopRain(false)
-	if inspector then
-		inspector:Destroy()
-		inspector = nil
-	end
-	table.clear(plan)
-	table.clear(fired)
-	table.clear(flags)
-	workspace:SetAttribute("ChaosPlan", nil)
-end
-
-local function planFor(dropIn: boolean)
-	reset()
-	local cur = S.JobService.Current()
-	if not cur then
-		return
-	end
+local function planFor(cur: any, calm: boolean)
+	local st = stateOf(cur)
 	local force = forced()
 	if force then
 		for name in force do
-			plan[name] = true
+			st.plan[name] = true
 		end
-	elseif not dropIn then
+	elseif not calm then
 		local candidates = { "Inspector" }
 		if hasPour(cur.bp) then
 			table.insert(candidates, "Rain")
@@ -406,36 +359,47 @@ local function planFor(dropIn: boolean)
 		local n = if #candidates > 1 and rng:NextNumber() < 0.5 then 2 else 1
 		for _ = 1, n do
 			local i = rng:NextInteger(1, #candidates)
-			plan[candidates[i]] = true
+			st.plan[candidates[i]] = true
 			table.remove(candidates, i)
 		end
 	end
 	local names = {}
 	for _, name in EVENTS do
-		if plan[name] then
+		if st.plan[name] then
 			table.insert(names, name)
 		end
 	end
-	workspace:SetAttribute("ChaosPlan", if #names > 0 then table.concat(names, ",") else nil)
+	cur.site:SetAttribute("ChaosPlan", if #names > 0 then table.concat(names, ",") else nil)
 	if #names > 0 then
-		print("[Chaos] planned:", table.concat(names, ", "))
+		print(("[Chaos] %s planned: %s"):format(cur.crew.name, table.concat(names, ", ")))
 	end
 end
 
-local function tick()
-	local cur = S.JobService.Current()
-	if not cur or cur.finishing then
+-- The job is over: stop the rain, send the inspector home, and make delayed work do nothing.
+local function wrapUp(cur: any)
+	local st = stateOf(cur)
+	stopRain(cur, false)
+	st.over = true
+	if st.inspector then
+		st.inspector:Destroy()
+		st.inspector = nil
+	end
+end
+
+local function tick(cur: any)
+	if cur.finishing then
 		return
 	end
-	if plan.Rain and not fired.Rain then
+	local st = stateOf(cur)
+	if st.plan.Rain and not st.fired.Rain then
 		for id, slot in cur.slots do
 			if string.sub(id, 1, 5) == "pour_" and slot.open and not slot.done then
-				startRain()
+				startRain(cur)
 				break
 			end
 		end
 	end
-	if plan.Inspector and not fired.Inspector then
+	if st.plan.Inspector and not st.fired.Inspector then
 		local done, total = 0, 0
 		for _, def in cur.bp.Slots do
 			total += 1
@@ -445,26 +409,33 @@ local function tick()
 			end
 		end
 		if total > 0 and done / total >= INSPECT_AT then
-			fired.Inspector = true
+			st.fired.Inspector = true
 			task.spawn(startInspector, cur)
 		end
 	end
 end
 
 function Chaos.Start()
-	Toast = Net.Event("Toast")
-	S.JobService.Started.Event:Connect(function(_siteId: string, dropIn: boolean, firstJob: boolean?)
-		planFor(dropIn or firstJob == true) -- a newcomer's first job stays calm
+	S.JobService.Started.Event:Connect(function(cur, dropIn: boolean, firstJob: boolean?)
+		planFor(cur, dropIn or firstJob == true) -- a newcomer's first job stays calm
 	end)
-	S.JobService.Ended.Event:Connect(function()
-		stopRain(false)
+	S.JobService.Ended.Event:Connect(function(cur)
+		stopRain(cur, false)
 	end)
-	S.JobService.Cleared.Event:Connect(reset)
+	S.JobService.Cleared.Event:Connect(wrapUp)
+	S.CrewService.Changed.Event:Connect(function(crew)
+		local cur = S.JobService.Of(crew)
+		if cur and stateOf(cur).raining then
+			tagRain(cur)
+		end
+	end)
 	while true do
 		task.wait(1)
-		local ok, err = pcall(tick)
-		if not ok then
-			warn("[Chaos]", err)
+		for _, cur in S.JobService.All() do
+			local ok, err = pcall(tick, cur)
+			if not ok then
+				warn("[Chaos]", err)
+			end
 		end
 	end
 end

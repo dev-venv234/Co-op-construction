@@ -20,6 +20,7 @@ deadline while things go wrong, then gets paid and upgrades. Players *are* the c
   dropped into a job. Someone joining while a crew is out at a site rides there with that site's board button. A
   newcomer's first job has no chaos events. The RV and truck dealer unlock after the **first payout**.
 - **Crews:** Quick Join matches you to any crew needing your trade, or form a crew as Foreman and pick the job tier. Empty slots get **bot workers** (slower, make mistakes, run the same task engine as players).
+  Since 2026-11-17 a server holds up to 6 crews at once, each on its own lot with its own job (see "Several crews per server").
 - **Trades:** each levels up separately. Every phase gives every trade work — **no trade idle more than 1 minute**.
 - **Building:** only fill glowing ghost outlines. No freeform building (prevents griefing, makes scoring easy).
 - **Four task types** power every trade: **Carry** (haul to zone, weight slows you), **Place** (snap into ghost outline), **Timing** (hit a moving window), **Connect** (route puzzle A→B).
@@ -635,7 +636,56 @@ The owner also pulled in two more trades, Welder and HVAC, and a tool shop on 20
     with the extra ~1,600 parts and 24 lights (all non-colliding decor), and a player actually driving the IN -> OUT
     route (the truck was placed in the bay by script).
 
+- **Several crews per server (2026-11-17, branch `multi-crew`, owner: "dont we need more lots/sites like do 5-8
+  companies per server?"; owner left the numbers to me):** up to **6 crews** a server (`CrewService.MAX_CREWS`), up to
+  6 players each (`MAX_MEMBERS`); each crew runs its own job on its own lot at the same time. Recommended server size
+  in Game Settings: about 30 (owner to set; the place is at 60, so crews can fill up and late joiners wait for room).
+  * **Crews (`CrewService`, rewritten):** crew = { id 1..6, name, companyId, members, roles, idleSince, votes, barred }.
+    Picking a trade without a crew puts you in your company's crew on the server (if it has room), else a new crew of
+    your own (bots fill the other trades), else (6 crews already) the crew with room that needs your trade. Name: the
+    founder's company name, else "Crew <id>". QUICK JOIN prefers a crew already on a job that needs your trade.
+    Remote `CrewAction` ("Join", id) / ("New") / ("Leave"). Player attributes `CrewId`, `CrewName`. CanDo / Snapshot /
+    IsRoleHeld / CanStartJobs (Foreman grace) work inside the crew. Kick vote = most of the rest of the crew (min 2);
+    voted out = out of the crew and barred from it, **not kicked from the server**. Pings go to crewmates only.
+    The last member leaving ends the crew's job with no pay and frees its lot (`Emptied`).
+  * **Jobs (`JobService`, rewritten):** `jobs[crew]` and `lotJob[lotId]`. Board buttons are still per tier
+    (`StartSite` = "Site_T1".."Site_T4"); StartJob takes the tier's first free lot from `Config/Sites` `Lots`, else
+    "every Site N lot has a crew on it". Blueprint yaw comes from the lot's gate (`Shared/Util/Lots.Yaw`). Site model
+    `JobSite_<bp>_<crewId>` with attributes `CrewId`, `Lot`. Every slot / pile / truck-bed prompt checks the worker is
+    on the owning crew (`onCrew`); vehicles and machines too (`JobService.MayUse`, used by VehicleService and
+    EquipmentService). Labels "Site 1A/1B/1C". Truck stalls: `Stall_k` in the RV truck lot minus the dealer's
+    (`DealerService.STALL` = Stall_6): crews 1-5 -> stalls 1-5, crew 6 -> new Stall_7. Drive-through loading runs per
+    job (`cur.loading`, `cur.yardStill`), so two trucks can load at Crew Supply at once. API: `Of(crew)`,
+    `ForPlayer(p)`, `All()`, `Live(cur)`, `Owning(inst)`, `Toast(cur, msg)`; everything that was "the current job"
+    now takes `cur`. State goes to each player for their own crew (coalesced `Broadcast()`, plus every 3 s while
+    jobs run); remote `Crews` sends everyone the board (crews, their jobs/phases, open trades, free lots per tier).
+  * **Per-job state** lives on the job table: `cur.quality` (QualityService functions take it first), `cur.botState`
+    (BotService: bots, pros, helpers), `cur.chaos`, `cur.insp` (inspection walks + retry offer), `cur.detail`,
+    `cur.sky`. Store boosts (Rush Delivery, Hire a Pro, Retry Inspection) act on the buyer's crew's job.
+  * **Per-crew client stuff:** rain and the retry offer are **player attributes** (`RainUntil`, `RetryOfferUntil`)
+    on that crew's members, not workspace attributes. **Day/night is now client-side** (`DayNightController`, new):
+    the server's `DayNightService` only sets `cur.sky` (predawn / sunrise t0+dur / day); each client sets
+    Lighting.ClockTime, ambient, NightLight/streetlight switching and the rain darkening locally. The server no longer
+    touches Lighting. Rain mud only slows that crew's vehicles (`VehicleService.SetSpeedFactor(f, site)`).
+  * **Client:** PromptFilter hides another crew's prompts (`UI.Foreign`); the guide ignores them; CREW panel lists
+    your crew (KICK, LEAVE) and every crew on the server (what it's doing, trades it needs, JOIN), plus NEW CREW. HUD
+    shows the crew name / "SHED Site 1B".
+  * **Map:** 4 new lots in `TownLayout`: Site_T1b (x 720..880) and Site_T1c (x 520..680) on Main St next to Site 1;
+    Site_T2b (z -1292..-1092) and Site_T2c (z -812..-612) on Pine Rd next to Site 2. Tiers 3-4 keep one lot each (8
+    lots). Built with the new `DevTools/LotBuilder` (ground + driveway terrain, curb cut, trees cleared, lot marker,
+    Stall_7) then `SiteBuilder.All()` (now loops lots; no longer touches the spawn or the board buttons).
+  * **Gotcha:** BindableEvents copy tables, so a listener got a copy of the crew/job and nothing matched. Crew and job
+    events (`CrewService.Changed/Emptied`, `JobService.Started/Ended/Cleared`) are now `Shared/Util/Signal` (plain Lua).
+  * Tested in Studio (one test player): picking a trade makes Crew 1; Site 1 job on lot 1A with truck in stall 1 and
+    bots after 8 s; HUD "SHED Site 1A"; only my trade's prompts on; LEAVE ends the job and clears site + bots; NEW
+    crew; a starter house on lot 2B and a shed on lot 1C (config order flipped for the test, then restored) laid out
+    inside their lots, screenshots OK. **Not tested:** two crews at the same time (Studio here runs one player:
+    needs a Team Test / live server with 2+ players), another crew's prompts being hidden, two trucks loading at once,
+    company crews, kick votes, phone performance with several jobs and their bots running.
+
 ## Studio workflow notes (learned the hard way)
+- BindableEvents copy any table passed through them (a listener gets a copy, not the same table). Pass tables between
+  services with `Shared/Util/Signal` or direct calls.
 - Seats auto-seat whoever touches them. Any seat with a trade rule must also check `Occupant` on the server and eject.
 - Animate client UI on `RunService.Heartbeat`, not RenderStepped: RenderStepped doesn't fire when Studio isn't rendering
   (and test runs stall).

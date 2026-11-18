@@ -55,6 +55,7 @@ export type Truck = {
 	winPos: Vector3,
 	winAt: number,
 	rider: Humanoid?, -- who sat in the seat last (to put them outside when they get out)
+	factor: number, -- chaos: mud during a rain delay slows the crew's vehicles (1 = normal)
 }
 
 -- Top speeds raised 2026-11-12 (owner: "make these trucks faster"): starter 36 -> 58 studs/s (~40 mph on the
@@ -66,7 +67,6 @@ local PAD_MAX_PER_SEC = 40
 
 local S: any
 local trucks: { Truck } = {}
-local speedFactor = 1 -- chaos: mud during a rain delay slows every vehicle (1 = normal)
 local GUARD_WINDOW = 1 -- seconds between the guard's distance checks
 local GUARD_SLACK = 1.25 -- how much faster than its top speed a client-driven vehicle may seem to go (lag)
 
@@ -98,6 +98,9 @@ local function setOwner(t: Truck)
 	local pl = if occ then Players:GetPlayerFromCharacter(occ.Parent) else nil
 	if pl and t.spec.role and not S.CrewService.CanDo(pl, t.spec.role) then
 		pl = nil
+	end
+	if pl and not S.JobService.MayUse(pl, t.model) then
+		pl = nil -- another crew's vehicle
 	end
 	if pl and os.clock() < t.banUntil then
 		pl = nil
@@ -162,7 +165,7 @@ local function guard(t: Truck)
 	elseif pos.Y > t.lastGood.Position.Y + 30 then
 		bad = "flew up"
 	elseif elapsed >= GUARD_WINDOW then
-		local allowed = t.spec.maxFwd * speedFactor * GUARD_SLACK * elapsed + 12
+		local allowed = t.spec.maxFwd * t.factor * GUARD_SLACK * elapsed + 12
 		if flat.Magnitude > allowed then
 			bad = ("went %d studs in %.1f s"):format(math.floor(flat.Magnitude), elapsed)
 		end
@@ -210,6 +213,12 @@ local function hookBoarding(t: Truck)
 			return
 		end
 		local Toast = Net.Event("Toast")
+		if not S.JobService.MayUse(p, t.model) then
+			local owner = S.JobService.Owning(t.model)
+			Toast:FireClient(p, ("That's %s's %s"):format(if owner then owner.crew.name else "another crew",
+				if t.kind == "Machine" then "machine" else "truck"))
+			return
+		end
 		if t.spec.role and not S.CrewService.CanDo(p, t.spec.role) then
 			Toast:FireClient(p, "Only the " .. t.spec.role .. " runs this machine")
 			return
@@ -270,6 +279,7 @@ function Vehicle.Register(model: Model, chassis: BasePart, seat: VehicleSeat, sp
 		winPos = chassis.Position,
 		winAt = os.clock(),
 		rider = nil,
+		factor = 1,
 	}
 	table.insert(trucks, t)
 	-- the client drive model reads its limits from here
@@ -278,7 +288,7 @@ function Vehicle.Register(model: Model, chassis: BasePart, seat: VehicleSeat, sp
 	model:SetAttribute("Accel", spec.accel)
 	model:SetAttribute("Brake", spec.brake)
 	model:SetAttribute("Turn", spec.turn)
-	model:SetAttribute("SpeedFactor", speedFactor)
+	model:SetAttribute("SpeedFactor", 1)
 	setOwner(t)
 	seat:GetPropertyChangedSignal("Occupant"):Connect(function()
 		t.padAt = 0
@@ -290,12 +300,14 @@ function Vehicle.Register(model: Model, chassis: BasePart, seat: VehicleSeat, sp
 			task.defer(placeOutside, t, prev) -- players only: bots climb out on their own (BotService)
 		end
 		local pl = if occ then Players:GetPlayerFromCharacter(occ.Parent) else nil
-		if pl and spec.role and not S.CrewService.CanDo(pl, spec.role) then
+		local foreign = pl ~= nil and not S.JobService.MayUse(pl, model)
+		if pl and (foreign or (spec.role and not S.CrewService.CanDo(pl, spec.role))) then
 			local w = seat:FindFirstChild("SeatWeld")
 			if w then
 				w:Destroy()
 			end
-			Net.Event("Toast"):FireClient(pl, "Only the " .. spec.role .. " runs this machine")
+			Net.Event("Toast"):FireClient(pl, if foreign then "That belongs to another crew"
+				else "Only the " .. tostring(spec.role) .. " runs this machine")
 		end
 		task.defer(setOwner, t)
 	end)
@@ -870,11 +882,15 @@ function Vehicle.Capacity(t: Truck): number
 	return t.capacity
 end
 
--- Chaos: mud during a rain delay slows every vehicle (1 = normal). Client-driven ones read the attribute.
-function Vehicle.SetSpeedFactor(f: number)
-	speedFactor = math.clamp(f, 0.2, 1)
+-- Chaos: mud during a rain delay slows the vehicles of one crew's job (1 = normal): those under `within` (its site
+-- model holds its truck and machines), or every vehicle when nil. Client-driven ones read the attribute.
+function Vehicle.SetSpeedFactor(f: number, within: Instance?)
+	local factor = math.clamp(f, 0.2, 1)
 	for _, t in trucks do
-		t.model:SetAttribute("SpeedFactor", speedFactor)
+		if not within or t.model:IsDescendantOf(within) then
+			t.factor = factor
+			t.model:SetAttribute("SpeedFactor", factor)
+		end
 	end
 end
 
@@ -940,6 +956,17 @@ function Vehicle.DespawnAll()
 		t.model:Destroy()
 	end
 	table.clear(trucks)
+end
+
+-- Removes the vehicles of one crew's job (its truck and machines live under its site model).
+function Vehicle.DespawnIn(site: Instance)
+	for i = #trucks, 1, -1 do
+		local t = trucks[i]
+		if not t.model.Parent or t.model:IsDescendantOf(site) then
+			t.model:Destroy()
+			table.remove(trucks, i)
+		end
+	end
 end
 
 local function moveToward(a: number, b: number, step: number): number
@@ -1027,7 +1054,7 @@ function Vehicle.Start()
 					steer = t.padSteer
 				end
 			end
-			local target = (if throttle > 0 then throttle * spec.maxFwd else throttle * spec.maxRev) * speedFactor
+			local target = (if throttle > 0 then throttle * spec.maxFwd else throttle * spec.maxRev) * t.factor
 			local braking = target == 0 or (t.speed ~= 0 and math.sign(target) ~= math.sign(t.speed))
 			t.speed = moveToward(t.speed, target, (if braking then spec.brake else spec.accel) * dt)
 

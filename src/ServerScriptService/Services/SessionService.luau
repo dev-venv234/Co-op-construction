@@ -2,10 +2,10 @@
 -- Session flow: where players appear and when (owner rule, 2026-11-11: everyone who joins starts at the RV park).
 --  * Joining: returning players (the first payout unlocks their own RV) spawn at their RV; first-time players
 --    spawn on the RV park camp lane next to the coffee stand and the truck lot board. Nobody is dropped into a job.
---    If a crew is already working, the guide points the joiner at that site's board button, which gives them a
---    ride out to the site (JobService).
---  * Respawning during a job you've worked on puts you back at its site; otherwise you go back to the RV park.
---  * When a job is cleared, everyone heads back to the RV park for the next 4:00 AM shift.
+--    A player who joins a crew that's already out at its site rides there with that site's board button (JobService).
+--  * Respawning during your crew's job, once you've worked on it, puts you back at its site; otherwise you go back
+--    to the RV park.
+--  * When a crew's job is cleared, that crew heads back to the RV park for its next 4:00 AM shift.
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -56,13 +56,13 @@ local function parkCFrame(p: Player): CFrame
 	return campSpawn
 end
 
--- Has this player worked on the running job? (Only they respawn at its site.)
-local function inJob(p: Player): boolean
-	local cur = S.JobService.Current()
+-- The crew's running job, when this player has worked on it (only they respawn at its site).
+local function jobOf(p: Player): any
+	local cur = S.JobService.ForPlayer(p)
 	if not cur or cur.finishing then
-		return false
+		return nil
 	end
-	return (S.QualityService.Contributors()[p] or 0) > 0
+	return if (S.QualityService.Contributors(cur.quality)[p] or 0) > 0 then cur else nil
 end
 
 local function place(p: Player, joining: boolean)
@@ -75,8 +75,9 @@ local function place(p: Player, joining: boolean)
 		return
 	end
 	local target = parkCFrame(p)
-	if not joining and inJob(p) then
-		target = S.JobService.SiteSpawn() or target
+	local cur = if joining then nil else jobOf(p)
+	if cur then
+		target = S.JobService.SiteSpawn(cur) or target
 	end
 	c:PivotTo(target)
 	if S.MoveGuard then
@@ -101,19 +102,19 @@ local function onJoin(p: Player)
 		Toast:FireClient(p, ("Welcome back! %s%s, $%d in the bank, %d jobs done."):format(
 			trade or "No trade yet", if typeof(level) == "number" then " Lv " .. level else "", cash, prof.Stats.JobsDone))
 	else
-		Toast:FireClient(p, "Welcome to the crew! Pick a trade, grab a coffee, then start Site 1 at the truck lot board.")
+		Toast:FireClient(p, "Welcome! Pick a trade to get a crew (or JOIN one from the CREW panel), grab a coffee, then start Site 1 at the truck lot board.")
 	end
-	local cur = S.JobService.Current()
+	local cur = S.JobService.ForPlayer(p)
 	if cur and not cur.finishing then
-		Toast:FireClient(p, ("A crew is working at Site %d right now: tap its button on the JOB SITES board to ride out."):format(cur.tier))
+		Toast:FireClient(p, ("Your crew is working at %s right now: tap the Site %d button on the JOB SITES board to ride out."):format(cur.label, cur.tier))
 	elseif returning(p) then
 		Toast:FireClient(p, "4:00 AM. Grab a coffee, then pick a site on the board at the truck lot.")
 	end
 end
 
-local function onCleared()
+local function onCleared(cur: any)
 	local Toast = Net.Event("Toast")
-	for _, p in Players:GetPlayers() do
+	for _, p in S.CrewService.Members(cur.crew) do
 		if returning(p) then
 			assignRV(p)
 		end

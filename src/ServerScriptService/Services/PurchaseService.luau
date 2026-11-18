@@ -367,7 +367,7 @@ local function onBuy(p: Player, key: string)
 		wants[p] = wants[p] or {}
 		wants[p][key] = os.clock()
 		if key == "RetryInspection" and (it.Id > 0 or mockOn()) then
-			S.InspectionService.HoldRetry() -- the offer waits (once) while this player is in the purchase prompt
+			S.InspectionService.HoldRetry(p) -- their crew's offer waits (once) while they're in the purchase prompt
 			retryHolder = p.UserId
 		end
 		prompt(p, key)
@@ -426,7 +426,7 @@ function Purchase.Start()
 			if not S.CrewService.GetRole(p) then
 				return false, "Pick a trade first"
 			end
-			return S.JobService.CanRush()
+			return S.JobService.CanRush(p)
 		end,
 		apply = function(p: Player)
 			return S.JobService.RushDelivery(p)
@@ -434,8 +434,8 @@ function Purchase.Start()
 	}
 
 	boosts.HirePro = {
-		can = function(_p: Player)
-			return S.BotService.CanHirePro()
+		can = function(p: Player)
+			return S.BotService.CanHirePro(p)
 		end,
 		apply = function(p: Player)
 			return S.BotService.HirePro(p)
@@ -443,8 +443,8 @@ function Purchase.Start()
 	}
 
 	boosts.RetryInspection = {
-		can = function(_p: Player)
-			return S.InspectionService.CanRetry()
+		can = function(p: Player)
+			return S.InspectionService.CanRetry(p)
 		end,
 		apply = function(p: Player)
 			return S.InspectionService.TakeRetry(p)
@@ -455,7 +455,10 @@ function Purchase.Start()
 	MarketplaceService.PromptProductPurchaseFinished:Connect(function(userId: number, productId: number, purchased: boolean)
 		if not purchased and productId == Items.RetryInspection.Id and productId > 0 and userId == retryHolder then
 			retryHolder = nil
-			S.InspectionService.ReleaseRetry()
+			local holder = Players:GetPlayerByUserId(userId)
+			if holder then
+				S.InspectionService.ReleaseRetry(holder)
+			end
 		end
 	end)
 

@@ -165,7 +165,7 @@ end
 local function updateWorld(dt: number)
 	local t = Lighting.ClockTime
 	local day = t >= 6 and t < 19
-	local rainUntil = workspace:GetAttribute("RainUntil")
+	local rainUntil = Players.LocalPlayer:GetAttribute("RainUntil")
 	local raining = typeof(rainUntil) == "number" and rainUntil > workspace:GetServerTimeNow()
 	local function fade(s: Sound, target: number)
 		s.Volume += (target - s.Volume) * math.min(1, dt * 1.5)

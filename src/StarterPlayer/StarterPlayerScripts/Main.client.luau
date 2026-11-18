@@ -18,6 +18,7 @@ local list: { Instance } = {
 	Controllers:WaitForChild("MachineController"),
 	Controllers:WaitForChild("SiteBoardController"),
 	Controllers:WaitForChild("RainController"),
+	Controllers:WaitForChild("DayNightController"),
 	Controllers:WaitForChild("DealerController"),
 	Controllers:WaitForChild("ToolShopController"),
 	Controllers:WaitForChild("StoreController"),

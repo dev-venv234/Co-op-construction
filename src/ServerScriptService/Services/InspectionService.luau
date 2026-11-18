@@ -29,17 +29,35 @@ local RETRY_SECONDS = 180 -- time to rebuild before the inspector walks again
 local MAX_RETRIES = 2 -- per job
 
 local S: any
-local Toast: RemoteEvent
-local inspector: Model? = nil
-local token = 0
 
 type Down = { slot: any, charge: Player? } -- a piece on the ground; charge = who pays for it (weak work only)
 type Offer = { cur: any, untilT: number, taken: Player?, held: boolean }
-local offer: Offer? = nil
-local rebuiltBy: { [string]: Instance } = {} -- slot id -> who rebuilt it in a retry (they answer for it now)
+-- Per job (cur.insp; 2026-11-17, several crews per server: each crew's inspection and retry offer are its own).
+type State = { token: number, inspector: Model?, offer: Offer?, rebuiltBy: { [string]: Instance } }
 
 function Inspection.Init(services)
 	S = services
+end
+
+local function stateOf(cur: any): State
+	local st = cur.insp
+	if not st then
+		st = { token = 0, inspector = nil, offer = nil, rebuiltBy = {} }
+		cur.insp = st
+	end
+	return st
+end
+
+-- Still this walk of this job? (A newer walk, or the job being torn down, stops an old one.)
+local function alive(cur: any, my: number): boolean
+	return stateOf(cur).token == my and S.JobService.Live(cur)
+end
+
+-- The crew's clients show a RETRY button while this is ahead (player attribute).
+local function tagOffer(cur: any, untilT: number?)
+	for _, p in S.CrewService.Members(cur.crew) do
+		p:SetAttribute("RetryOfferUntil", untilT)
+	end
 end
 
 local function isRework(id: string): boolean
@@ -55,10 +73,10 @@ local function structural(def: any): boolean
 end
 
 -- Who answers for a piece: whoever rebuilt it in a retry, else whoever built it.
-local function builderOf(slotId: string): Instance?
-	local who: any = rebuiltBy[slotId]
+local function builderOf(cur: any, slotId: string): Instance?
+	local who: any = stateOf(cur).rebuiltBy[slotId]
 	if not who then
-		local rec = S.QualityService.RecordOf(slotId)
+		local rec = S.QualityService.RecordOf(cur.quality, slotId)
 		who = rec and rec.player
 	end
 	return if typeof(who) == "Instance" then who else nil
@@ -66,8 +84,8 @@ end
 
 -- Weak work only counts when a player built it: bots are the crew's stand-ins, and their misses already
 -- lower the grade, so their work never collapses.
-local function builtByPlayer(slotId: string): boolean
-	local who = builderOf(slotId)
+local function builtByPlayer(cur: any, slotId: string): boolean
+	local who = builderOf(cur, slotId)
 	return who ~= nil and who:IsA("Player")
 end
 
@@ -153,9 +171,9 @@ local function inspect(cur: any, my: number, again: boolean): { Down }?
 
 	-- Weak work, worst first (a piece still on the ground from an earlier walk isn't judged twice)
 	local weak = {}
-	for _, r in S.QualityService.LowestFor(WEAK, 40) do
+	for _, r in S.QualityService.LowestFor(cur.quality, WEAK, 40) do
 		local slot = cur.slots[r.slotId]
-		if slot and slot.done and not isRework(r.slotId) and structural(slot.def) and builtByPlayer(r.slotId)
+		if slot and slot.done and not isRework(r.slotId) and structural(slot.def) and builtByPlayer(cur, r.slotId)
 			and not slot.part:GetAttribute("Collapsed") then
 			table.insert(weak, slot)
 			if #weak >= MAX_WEAK then
@@ -164,8 +182,9 @@ local function inspect(cur: any, my: number, again: boolean): { Down }?
 		end
 	end
 
-	local spawnCF = S.JobService.SiteSpawn() or cur.originCF
-	local body = inspector
+	local st = stateOf(cur)
+	local spawnCF = S.JobService.SiteSpawn(cur) or cur.originCF
+	local body = st.inspector
 	if not body or not body.Parent then
 		body = S.BotService.MakeBody("Inspector", Color3.fromRGB(240, 240, 235), Color3.fromRGB(250, 250, 250), spawnCF)
 		if body then
@@ -173,10 +192,10 @@ local function inspect(cur: any, my: number, again: boolean): { Down }?
 			hum.WalkSpeed = WALK_SPEED
 			body:SetAttribute("Inspector", true)
 			body.Parent = workspace
-			inspector = body
+			st.inspector = body
 		end
 	end
-	Toast:FireAllClients(if again then "RE-INSPECTION: the inspector is walking the house again..."
+	S.JobService.Toast(cur, if again then "RE-INSPECTION: the inspector is walking the house again..."
 		else "FINAL INSPECTION: the inspector is walking the house...")
 	Net.Cue("Whistle", spawnCF.Position)
 
@@ -213,7 +232,7 @@ local function inspect(cur: any, my: number, again: boolean): { Down }?
 	end
 
 	for _, stop in route do
-		if token ~= my or S.JobService.Current() ~= cur then
+		if not alive(cur, my) then
 			return nil
 		end
 		if body then
@@ -222,7 +241,7 @@ local function inspect(cur: any, my: number, again: boolean): { Down }?
 		local slot = stop.slot
 		if slot and not slot.part:GetAttribute("Collapsed") then
 			task.wait(1)
-			local who = builderOf(slot.def.Id)
+			local who = builderOf(cur, slot.def.Id)
 			local payer: Player? = if who and who:IsA("Player") and who.Parent == Players then who else nil
 			local falling = { slot }
 			dependents(cur, slot.def.Id, falling, { [slot.def.Id] = true })
@@ -239,7 +258,7 @@ local function inspect(cur: any, my: number, again: boolean): { Down }?
 			elseif who then
 				text ..= " (bot work)"
 			end
-			Toast:FireAllClients(text)
+			S.JobService.Toast(cur, text)
 			task.wait(1.2)
 		end
 	end
@@ -250,69 +269,79 @@ end
 -- Retry Inspection
 ---------------------------------------------------------------------------------------------------------------
 
--- Is a retry on offer right now? (PurchaseService asks before it charges or uses a credit.)
-function Inspection.CanRetry(): (boolean, string?)
-	local o = offer
-	if not o or o.taken or S.JobService.Current() ~= o.cur then
-		return false, "Retry Inspection is for right after a final inspection where work collapsed"
+-- The retry on offer to this player's crew, if any.
+local function offerFor(p: Player): Offer?
+	local cur = S.JobService.ForPlayer(p)
+	local o = if cur then stateOf(cur).offer else nil
+	if not o or o.taken or not S.JobService.Live(o.cur) then
+		return nil
+	end
+	return o
+end
+
+-- Is a retry on offer to this player's crew right now? (PurchaseService asks before it charges or uses a credit.)
+function Inspection.CanRetry(p: Player): (boolean, string?)
+	if not offerFor(p) then
+		return false, "Retry Inspection is for right after your crew's final inspection where work collapsed"
 	end
 	return true, nil
 end
 
--- Takes the retry on offer for the crew. Never yields.
+-- Takes the retry on offer for the buyer's crew. Never yields.
 function Inspection.TakeRetry(p: Player): (boolean, string?)
-	local ok, why = Inspection.CanRetry()
-	local o = offer
-	if not ok or not o then
-		return false, why
+	local o = offerFor(p)
+	if not o then
+		return Inspection.CanRetry(p)
 	end
 	o.taken = p
-	Toast:FireAllClients(("%s bought RETRY INSPECTION: rebuild the fallen work, then the inspector walks again!"):format(p.Name))
+	S.JobService.Toast(o.cur, ("%s bought RETRY INSPECTION: rebuild the fallen work, then the inspector walks again!"):format(p.Name))
 	return true, nil
 end
 
--- Someone is in Roblox's purchase prompt for the retry: keep the window open longer (once per offer).
-function Inspection.HoldRetry()
-	local o = offer
-	if o and not o.taken and not o.held then
+-- Someone is in Roblox's purchase prompt for the retry: keep their crew's window open longer (once per offer).
+function Inspection.HoldRetry(p: Player)
+	local o = offerFor(p)
+	if o and not o.held then
 		o.held = true
 		o.untilT = math.max(o.untilT, workspace:GetServerTimeNow() + RETRY_HOLD)
-		workspace:SetAttribute("RetryOfferUntil", o.untilT)
+		tagOffer(o.cur, o.untilT)
 	end
 end
 
 -- That prompt closed without a purchase: stop holding.
-function Inspection.ReleaseRetry()
-	local o = offer
-	if o and not o.taken and o.held then
+function Inspection.ReleaseRetry(p: Player)
+	local o = offerFor(p)
+	if o and o.held then
 		o.untilT = math.min(o.untilT, workspace:GetServerTimeNow() + 6)
-		workspace:SetAttribute("RetryOfferUntil", o.untilT)
+		tagOffer(o.cur, o.untilT)
 	end
 end
 
 -- Opens the offer and waits. True when someone took it.
 local function waitForRetry(cur: any, my: number, pieces: number): boolean
+	local st = stateOf(cur)
 	local o: Offer = { cur = cur, untilT = workspace:GetServerTimeNow() + RETRY_WINDOW, taken = nil, held = false }
-	offer = o
-	workspace:SetAttribute("RetryOfferUntil", o.untilT) -- clients show a RETRY button while this is ahead
-	Toast:FireAllClients(("RETRY INSPECTION? Rebuild the %d fallen piece%s and get inspected again instead of paying for them (STORE, %d s)"):format(
+	st.offer = o
+	tagOffer(cur, o.untilT) -- the crew's clients show a RETRY button while this is ahead
+	S.JobService.Toast(cur, ("RETRY INSPECTION? Rebuild the %d fallen piece%s and get inspected again instead of paying for them (STORE, %d s)"):format(
 		pieces, if pieces == 1 then "" else "s", RETRY_WINDOW))
-	local alive = true
+	local ok = true
 	while not o.taken and workspace:GetServerTimeNow() < o.untilT do
-		if token ~= my or S.JobService.Current() ~= cur then
-			alive = false
+		if not alive(cur, my) then
+			ok = false
 			break
 		end
 		task.wait(0.25)
 	end
-	offer = nil
-	workspace:SetAttribute("RetryOfferUntil", nil)
-	return alive and o.taken ~= nil
+	st.offer = nil
+	tagOffer(cur, nil)
+	return ok and o.taken ~= nil
 end
 
 -- The retry itself: every fallen piece becomes a rebuild task for its trade. Rebuilt pieces go back up and leave
 -- `down`; what isn't rebuilt in time stays down. Returns false when the job was torn down meanwhile.
 local function rebuild(cur: any, my: number, down: { Down }, round: number): boolean
+	local st = stateOf(cur)
 	S.JobService.SetPhaseNote(cur, "Rebuild the fallen work for re-inspection")
 	local open = true
 	local pending = 0
@@ -322,7 +351,7 @@ local function rebuild(cur: any, my: number, down: { Down }, round: number): boo
 		local slot = d.slot
 		local home: CFrame = slot.homeCF or slot.part.CFrame
 		local id = ("redo%d_%s"):format(round, slot.def.Id)
-		local added = S.JobService.AddSlot({
+		local added = S.JobService.AddSlot(cur, {
 			Id = id,
 			Kind = "Timing",
 			Role = slot.def.Role,
@@ -340,27 +369,27 @@ local function rebuild(cur: any, my: number, down: { Down }, round: number): boo
 			rebuilt[d] = true
 			pending -= 1
 			-- the piece now counts as well as it was rebuilt, and whoever rebuilt it answers for it
-			local rec = S.QualityService.RecordOf(id)
-			S.QualityService.Replace(slot.def.Id, if rec then rec.accuracy else 0.9)
-			rebuiltBy[slot.def.Id] = worker
+			local rec = S.QualityService.RecordOf(cur.quality, id)
+			S.QualityService.Replace(cur.quality, slot.def.Id, if rec then rec.accuracy else 0.9)
+			st.rebuiltBy[slot.def.Id] = worker
 		end)
 		if added then
 			pending += 1
 			table.insert(ids, id)
 		end
 	end
-	Toast:FireAllClients(("Rebuild the fallen work (%d task%s, green markers): %d:%02d until the inspector walks again"):format(
+	S.JobService.Toast(cur, ("Rebuild the fallen work (%d task%s, green markers): %d:%02d until the inspector walks again"):format(
 		pending, if pending == 1 then "" else "s", RETRY_SECONDS // 60, RETRY_SECONDS % 60))
 	local t0 = os.clock()
 	while pending > 0 and os.clock() - t0 < RETRY_SECONDS do
-		if token ~= my or S.JobService.Current() ~= cur then
+		if not alive(cur, my) then
 			return false
 		end
 		task.wait(0.5)
 	end
 	open = false
 	for _, id in ids do
-		S.JobService.DropSlot(id) -- rebuild tasks nobody finished close without credit
+		S.JobService.DropSlot(cur, id) -- rebuild tasks nobody finished close without credit
 	end
 	for i = #down, 1, -1 do
 		if rebuilt[down[i]] then
@@ -368,15 +397,16 @@ local function rebuild(cur: any, my: number, down: { Down }, round: number): boo
 		end
 	end
 	S.JobService.SetPhaseNote(cur, nil)
-	return token == my and S.JobService.Current() == cur
+	return alive(cur, my)
 end
 
 -- Runs the walk (and any retries); calls onDone(damageByPlayer, collapsedCount) once (not called if the job is
 -- torn down first).
 function Inspection.Run(cur: any, onDone: ({ [Player]: number }, number) -> ())
-	token += 1
-	local my = token
-	table.clear(rebuiltBy)
+	local st = stateOf(cur)
+	st.token += 1
+	local my = st.token
+	table.clear(st.rebuiltBy)
 	task.spawn(function()
 		local perPiece = math.floor(cur.cfg.BasePay * DAMAGE_SHARE + 0.5)
 		local down: { Down } = {} -- every piece on the ground right now
@@ -390,12 +420,12 @@ function Inspection.Run(cur: any, onDone: ({ [Player]: number }, number) -> ())
 				table.insert(down, d)
 			end
 			if #down == 0 then
-				Toast:FireAllClients("INSPECTION PASSED! Solid work, crew.")
+				S.JobService.Toast(cur, "INSPECTION PASSED! Solid work, crew.")
 			else
-				Toast:FireAllClients(("Inspection done: %d piece%s collapsed."):format(#down, if #down == 1 then "" else "s"))
+				S.JobService.Toast(cur, ("Inspection done: %d piece%s collapsed."):format(#down, if #down == 1 then "" else "s"))
 			end
 			task.wait(1.5)
-			if token ~= my or S.JobService.Current() ~= cur then
+			if not alive(cur, my) then
 				return
 			end
 			-- no offer (and no wait) when nobody could take one: not on sale and no saved retry on this server
@@ -409,7 +439,7 @@ function Inspection.Run(cur: any, onDone: ({ [Player]: number }, number) -> ())
 				return
 			end
 		end
-		if token ~= my or S.JobService.Current() ~= cur then
+		if not alive(cur, my) then
 			return
 		end
 		-- whoever built the weak pieces still on the ground pays for them
@@ -425,15 +455,14 @@ function Inspection.Run(cur: any, onDone: ({ [Player]: number }, number) -> ())
 end
 
 function Inspection.Start()
-	Toast = Net.Event("Toast")
-	workspace:SetAttribute("RetryOfferUntil", nil)
-	S.JobService.Cleared.Event:Connect(function()
-		token += 1
-		offer = nil
-		workspace:SetAttribute("RetryOfferUntil", nil)
-		if inspector then
-			inspector:Destroy()
-			inspector = nil
+	S.JobService.Cleared.Event:Connect(function(cur)
+		local st = stateOf(cur)
+		st.token += 1
+		st.offer = nil
+		tagOffer(cur, nil)
+		if st.inspector then
+			st.inspector:Destroy()
+			st.inspector = nil
 		end
 	end)
 end

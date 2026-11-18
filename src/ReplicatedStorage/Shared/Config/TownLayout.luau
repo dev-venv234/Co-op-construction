@@ -34,6 +34,16 @@ return {
 			Gate = { Road = "Main St", At = 1000, Side = 1, Width = 28 } },
 		{ Id = "Site_T2", Kind = "Site", Tier = 2, Label = "SITE 2 - STARTER HOUSE", Min = V2(-972, -1052), Max = V2(-772, -852),
 			Gate = { Road = "Pine Rd", At = -952, Side = 1, Width = 28 } },
+		-- extra lots (2026-11-17, several crews per server): two more sheds west of Site 1 on Main St, two more starter
+		-- houses north and south of Site 2 on Pine Rd
+		{ Id = "Site_T1b", Kind = "Site", Tier = 1, Label = "SITE 1B - SHED", Min = V2(720, -372), Max = V2(880, -212),
+			Gate = { Road = "Main St", At = 800, Side = 1, Width = 28 } },
+		{ Id = "Site_T1c", Kind = "Site", Tier = 1, Label = "SITE 1C - SHED", Min = V2(520, -372), Max = V2(680, -212),
+			Gate = { Road = "Main St", At = 600, Side = 1, Width = 28 } },
+		{ Id = "Site_T2b", Kind = "Site", Tier = 2, Label = "SITE 2B - STARTER HOUSE", Min = V2(-972, -1292), Max = V2(-772, -1092),
+			Gate = { Road = "Pine Rd", At = -1192, Side = 1, Width = 28 } },
+		{ Id = "Site_T2c", Kind = "Site", Tier = 2, Label = "SITE 2C - STARTER HOUSE", Min = V2(-972, -812), Max = V2(-772, -612),
+			Gate = { Road = "Pine Rd", At = -712, Side = 1, Width = 28 } },
 		{ Id = "Site_T3", Kind = "Site", Tier = 3, Label = "SITE 3 - TWO-STORY", Min = V2(800, -1652), Max = V2(1040, -1428),
 			Gate = { Road = "Ridge Rd", At = 920, Side = -1, Width = 28 } },
 		{ Id = "Site_T4", Kind = "Site", Tier = 4, Label = "SITE 4 - LUXURY HOME", Min = V2(-960, -2512), Max = V2(-680, -2228),

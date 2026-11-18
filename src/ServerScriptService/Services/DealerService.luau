@@ -13,6 +13,7 @@ local Dealer = {}
 
 local KIND = "WorkPickup"
 local STALL = "Stall_6"
+Dealer.STALL = STALL -- (JobService leaves this stall out of the crews' truck stalls)
 local REACH = 12
 
 local S: any

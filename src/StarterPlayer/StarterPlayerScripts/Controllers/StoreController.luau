@@ -212,7 +212,7 @@ local function build()
 		end
 	end)
 
-	-- Retry Inspection: a big button in the middle while the server's offer is open (workspace.RetryOfferUntil)
+	-- Retry Inspection: a big button in the middle while the server's offer to my crew is open (RetryOfferUntil)
 	retryBtn = Instance.new("TextButton")
 	retryBtn.Name = "RetryButton"
 	retryBtn.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -274,8 +274,8 @@ function Store.Start()
 	UI.StateChanged.Event:Connect(changed)
 	player:GetAttributeChangedSignal("Credits"):Connect(changed)
 	player:GetAttributeChangedSignal("DoublePay"):Connect(changed)
-	workspace:GetAttributeChangedSignal("RetryOfferUntil"):Connect(function()
-		if typeof(workspace:GetAttribute("RetryOfferUntil")) == "number" then
+	player:GetAttributeChangedSignal("RetryOfferUntil"):Connect(function()
+		if typeof(player:GetAttribute("RetryOfferUntil")) == "number" then
 			lastAsk = 0
 			ask() -- for the price / saved credit on the button
 		end
@@ -288,7 +288,7 @@ function Store.Start()
 			return
 		end
 		acc = 0
-		local untilT = workspace:GetAttribute("RetryOfferUntil")
+		local untilT = player:GetAttribute("RetryOfferUntil")
 		local left = if typeof(untilT) == "number" then untilT - workspace:GetServerTimeNow() else 0
 		retryBtn.Visible = left > 0
 		if left > 0 then

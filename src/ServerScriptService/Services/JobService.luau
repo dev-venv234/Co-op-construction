@@ -1,34 +1,40 @@
 --!strict
--- Job lifecycle (one crew job per server):
---   RV park site button (unlocked tiers only) -> blueprint built at that site, the starter's truck (empty) in RV
---   lot stall 1 -> crew loads the job's materials at the Crew Supply store (Main St) -> drives to the site -> unloads on the
---   DELIVERY pad (a load bigger than the truck takes more trips) ->
---   ghost slots open as their requirements finish -> inspection -> payout -> cleanup.
--- First-time players get a "drop-in" job instead (SessionService): the truck is already loaded and parked at
--- the site. Every prompt is re-validated here before the task engine runs.
+-- Job lifecycle, one job per crew (2026-11-17: several crews per server, CrewService):
+--   RV park site button (unlocked tiers only) -> the starter's crew claims a free lot of that tier and the blueprint is
+--   built there, the crew's truck (empty) waits in its own RV lot stall -> the crew loads the job's materials at the
+--   Crew Supply store (Main St) -> drives to its lot -> unloads on the DELIVERY pad (a load bigger than the truck takes
+--   more trips) -> ghost slots open as their requirements finish -> inspection -> payout -> cleanup (the lot is free).
+-- Every prompt is re-validated here before the task engine runs, including that the worker is on the crew that owns
+-- the site. Crew messages go to that crew only.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 
 local Net = require(ReplicatedStorage.Shared.Util.Net)
+local Signal = require(ReplicatedStorage.Shared.Util.Signal)
+local Lots = require(ReplicatedStorage.Shared.Util.Lots)
 local JobsConfig = require(ServerStorage.Config.Jobs)
 local SitesConfig = require(ServerStorage.Config.Sites)
-local TownLayout = require(ReplicatedStorage.Shared.Config.TownLayout)
 
 local Job = {}
-Job.Started = Instance.new("BindableEvent") -- (siteId: string, dropIn: boolean, firstJob: boolean)
-Job.Ended = Instance.new("BindableEvent") -- (success: boolean)
-Job.Cleared = Instance.new("BindableEvent") -- after the site is torn down
+-- (Lua signals, not BindableEvents: those would hand listeners a copy of the job table)
+Job.Started = Signal.new() -- (cur, dropIn: boolean, firstJob: boolean)
+Job.Ended = Signal.new() -- (cur, success: boolean)
+Job.Cleared = Signal.new() -- (cur) after its site is torn down
 
 local S: any
 local StateEvent: RemoteEvent
+local BoardEvent: RemoteEvent
 local Toast: RemoteEvent
 local PayoutEvent: RemoteEvent
 
-type Current = {
+export type Current = {
+	crew: any, -- CrewService crew that owns this job
 	id: string,
-	siteId: string,
+	siteId: string, -- the tier key on the board ("Site_T1")
+	lotId: string, -- the lot it's built on ("Site_T1b")
+	label: string, -- "Site 1B"
 	tier: number,
 	dropIn: boolean,
 	originCF: CFrame,
@@ -43,19 +49,27 @@ type Current = {
 	deadlineAt: number,
 	startedAt: number, -- os.clock() when the job started
 	roleWorked: { [string]: number }, -- os.clock() of the last task a player finished, per trade
-	joined: { [Player]: number }, -- os.clock() from which each player counts as on this job (pay share by time)
+	joined: { [Player]: number }, -- os.clock() from which each member counts as on this job (pay share by time)
 	finishing: boolean,
 	inspecting: boolean?,
 	phaseNote: string?, -- shown as the phase instead of "Final inspection" (Retry Inspection: rebuilding)
+	quality: any, -- QualityService records for this job
+	sky: { mode: string, t0: number, dur: number }?, -- DayNightService: what this crew's sky is doing
+	loading: boolean, -- bundles flying into this crew's truck right now
+	yardLast: Vector3?,
+	yardStill: number,
+	[string]: any, -- per-service state (BotService, ChaosService, InspectionService, DetailService)
 }
-local current: Current? = nil
+
+local jobs: { [any]: Current } = {} -- crew -> its job
+local lotJob: { [string]: Current } = {} -- lot id -> the job on it
 
 local CLEANUP_DELAY = 10
 local DOCK_REACH = 45 -- truck must be this close to the dock to load (anywhere under / beside the LOADING canopy)
 local dockPos: Vector3? = nil
 
--- Every prompt goes through one handler table, so bots (Phase 3) and Studio tests can trigger
--- exactly the same server code a player's tap does.
+-- Every prompt goes through one handler table, so bots and Studio tests can trigger exactly the same server code a
+-- player's tap does.
 local promptHandlers: { [ProximityPrompt]: (Player) -> () } = {}
 local function onPrompt(pp: ProximityPrompt, fn: (Player) -> ())
 	promptHandlers[pp] = fn
@@ -79,9 +93,53 @@ function Job.Init(services)
 	S = services
 end
 
--- Read-only view of the running job (nil when none).
-function Job.Current(): Current?
-	return current
+---------------------------------------------------------------------------------------------------------------
+-- Lookups
+---------------------------------------------------------------------------------------------------------------
+
+-- The crew's running job (nil when none). Read-only for other services.
+function Job.Of(crew: any): Current?
+	return if crew then jobs[crew] else nil
+end
+
+-- The job of this player's crew.
+function Job.ForPlayer(p: Player): Current?
+	local crew = S.CrewService.Of(p)
+	return if crew then jobs[crew] else nil
+end
+
+function Job.All(): { Current }
+	local out = {}
+	for _, cur in jobs do
+		table.insert(out, cur)
+	end
+	return out
+end
+
+-- Is this job still the one its crew is running? (Delayed work from an old job checks this.)
+function Job.Live(cur: Current?): boolean
+	return cur ~= nil and jobs[cur.crew] == cur
+end
+
+-- The job whose site holds this instance (the crew's truck, machines, slots, piles all live under the site model).
+local function jobOwning(inst: Instance): Current?
+	for _, cur in jobs do
+		if inst:IsDescendantOf(cur.site) then
+			return cur
+		end
+	end
+	return nil
+end
+Job.Owning = jobOwning
+
+-- May this player use a vehicle or machine? Anything that belongs to a crew's job is for that crew only.
+function Job.MayUse(p: Player, inst: Instance): boolean
+	local cur = jobOwning(inst)
+	return cur == nil or S.CrewService.Of(p) == cur.crew
+end
+
+function Job.Toast(cur: Current, text: string)
+	S.CrewService.Toast(cur.crew, text)
 end
 
 -- A worker is a Player or a bot's character Model (BotService).
@@ -108,6 +166,20 @@ local function near(p: Instance, pos: Vector3, reach: number): boolean
 	return root ~= nil and (root.Position - pos).Magnitude <= reach
 end
 
+-- Players only work their own crew's site. (Bots are spawned for one job and only ever use that job's entry points.)
+local function onCrew(cur: Current, p: Instance): boolean
+	if not p:IsA("Player") then
+		return true
+	end
+	if S.CrewService.Of(p) == cur.crew then
+		return true
+	end
+	if S.TaskEngine.Guard.Allow(p, "ForeignSite", 3) then
+		Toast:FireClient(p, ("This is %s's site. Join their crew from the CREW panel to help"):format(cur.crew.name))
+	end
+	return false
+end
+
 local function makePrompt(parent: Instance, action: string, object: string, reach: number): ProximityPrompt
 	local pp = Instance.new("ProximityPrompt")
 	pp.ActionText = action
@@ -120,6 +192,10 @@ local function makePrompt(parent: Instance, action: string, object: string, reac
 	pp.Parent = parent
 	return pp
 end
+
+---------------------------------------------------------------------------------------------------------------
+-- Load progress
+---------------------------------------------------------------------------------------------------------------
 
 -- Bundles still to bring to the site, per item (already unloaded ones don't count).
 local function remaining(cur: Current): { [string]: number }
@@ -157,50 +233,133 @@ local function tripProgress(cur: Current): (number, number)
 	return onTruck, math.min(S.VehicleService.Capacity(cur.truck), left)
 end
 
-local function snapshot(): { [string]: any }
-	local s: { [string]: any } = { active = false, roles = S.CrewService.Snapshot() }
-	local cur = current
+---------------------------------------------------------------------------------------------------------------
+-- State for clients: each player gets their own crew's job; everyone gets the board of all crews
+---------------------------------------------------------------------------------------------------------------
+
+local function phaseOf(cur: Current): (number, number, string)
+	local done, total, phase = 0, 0, "Wrapping up"
+	for _, id in cur.order do
+		local slot = cur.slots[id]
+		total += 1
+		if slot.done then
+			done += 1
+		elseif phase == "Wrapping up" then
+			phase = slot.def.Phase
+		end
+	end
+	local deliver = cur.slots.deliver
+	if deliver and not deliver.done then
+		local have, need = loadProgress(cur)
+		local onTruck, target = tripProgress(cur)
+		-- a loaded truck already at the site only needs unloading
+		local atSite = cur.truck ~= nil and (S.VehicleService.Position(cur.truck) - deliver.part.Position).Magnitude < 60
+		phase = if onTruck == 0 or onTruck < target
+			then ("Load the truck at Crew Supply %d/%d"):format(have, need)
+			elseif atSite then "Unload the truck at DELIVERY"
+			else ("Drive to %s, unload at DELIVERY"):format(cur.label)
+		if cur.trips > 0 then
+			phase ..= (" (trip %d)"):format(cur.trips + 1)
+		end
+	end
+	if cur.finishing then
+		phase = "Finished"
+	elseif cur.phaseNote then
+		phase = cur.phaseNote
+	elseif cur.inspecting then
+		phase = "Final inspection"
+	end
+	return done, total, phase
+end
+
+local function snapshot(crew: any): { [string]: any }
+	local s: { [string]: any } = { active = false, roles = S.CrewService.Snapshot(crew) }
+	if crew then
+		s.crew = { id = crew.id, name = crew.name }
+	end
+	local cur = if crew then jobs[crew] else nil
 	if cur then
-		local done, total, phase = 0, 0, "Wrapping up"
-		for _, id in cur.order do
-			local slot = cur.slots[id]
-			total += 1
-			if slot.done then
-				done += 1
-			elseif phase == "Wrapping up" then
-				phase = slot.def.Phase
-			end
-		end
-		local deliver = cur.slots.deliver
-		if deliver and not deliver.done then
-			local have, need = loadProgress(cur)
-			local onTruck, target = tripProgress(cur)
-			-- a loaded truck already at the site (first-timer drop-ins start that way) only needs unloading
-			local atSite = cur.truck ~= nil and (S.VehicleService.Position(cur.truck) - deliver.part.Position).Magnitude < 60
-			phase = if onTruck == 0 or onTruck < target
-				then ("Load the truck at Crew Supply %d/%d"):format(have, need)
-				elseif atSite then "Unload the truck at DELIVERY"
-				else ("Drive to Site %d, unload at DELIVERY"):format(cur.tier)
-			if cur.trips > 0 then
-				phase ..= (" (trip %d)"):format(cur.trips + 1)
-			end
-		end
+		local done, total, phase = phaseOf(cur)
 		s.active = true
 		s.job = cur.bp.DisplayName
 		s.site = cur.tier
+		s.siteKey = cur.siteId
+		s.lot = cur.label
 		s.deadlineAt = cur.deadlineAt
 		s.done = done
 		s.total = total
-		s.phase = if cur.finishing then "Finished" elseif cur.phaseNote then cur.phaseNote
-			elseif cur.inspecting then "Final inspection" else phase
+		s.phase = phase
+		s.sky = cur.sky
 	end
-	s.bots = if S.BotService then S.BotService.Summary() else {}
+	s.bots = if S.BotService and cur then S.BotService.Summary(cur) else {}
 	return s
 end
 
-function Job.Broadcast()
-	StateEvent:FireAllClients(snapshot())
+-- Free lots per tier key (the board shows them; StartJob picks one).
+local function freeLots(siteKey: string): { string }
+	local out = {}
+	local cfg = SitesConfig[siteKey]
+	for _, lotId in (cfg and cfg.Lots or {}) do
+		if not lotJob[lotId] and Lots.Get(lotId) then
+			table.insert(out, lotId)
+		end
+	end
+	return out
 end
+
+local function board(): { [string]: any }
+	local list = S.CrewService.Board()
+	for _, row in list do
+		local crew = S.CrewService.ById(row.id)
+		local cur = crew and jobs[crew]
+		if cur then
+			local done, total, phase = phaseOf(cur)
+			row.job = cur.bp.DisplayName
+			row.lot = cur.label
+			row.done = done
+			row.total = total
+			row.phase = phase
+		end
+	end
+	local lots: { [string]: { free: number, total: number } } = {}
+	for _, key in SitesConfig.Order do
+		lots[key] = { free = #freeLots(key), total = #SitesConfig[key].Lots }
+	end
+	return { crews = list, lots = lots, maxCrews = S.CrewService.MAX_CREWS }
+end
+
+local pending = false
+local function flush()
+	pending = false
+	local byCrew: { [any]: { [string]: any } } = {}
+	local lobby: { [string]: any }? = nil
+	for _, p in Players:GetPlayers() do
+		local crew = S.CrewService.Of(p)
+		local s
+		if crew then
+			s = byCrew[crew] or snapshot(crew)
+			byCrew[crew] = s
+		else
+			s = lobby or snapshot(nil)
+			lobby = s
+		end
+		StateEvent:FireClient(p, s)
+	end
+	BoardEvent:FireAllClients(board())
+end
+
+-- Sends every player their crew's state (coalesced: many changes in one frame send once).
+function Job.Broadcast()
+	if pending then
+		return
+	end
+	pending = true
+	task.defer(flush)
+end
+
+---------------------------------------------------------------------------------------------------------------
+-- Slots
+---------------------------------------------------------------------------------------------------------------
 
 local function requirementsMet(cur: Current, slot: any): boolean
 	for _, id in slot.def.Requires do
@@ -237,10 +396,10 @@ local function refresh(cur: Current)
 	end
 end
 
-local finish: (success: boolean, damage: { [Player]: number }?, fallen: number?) -> ()
+local finish: (cur: Current, success: boolean, damage: { [Player]: number }?, fallen: number?) -> ()
 
 local function complete(cur: Current, slot: any, p: Instance, accuracy: number)
-	if current ~= cur or cur.finishing or slot.done then
+	if not Job.Live(cur) or cur.finishing or slot.done then
 		return
 	end
 	slot.done = true
@@ -249,7 +408,7 @@ local function complete(cur: Current, slot: any, p: Instance, accuracy: number)
 	if p:IsA("Player") then
 		cur.roleWorked[slot.def.Role] = os.clock() -- a player is working this trade (StalledRoles)
 	end
-	S.QualityService.Record(p, slot.def.Id, accuracy)
+	S.QualityService.Record(cur.quality, p, slot.def.Id, accuracy)
 	S.ProgressionService.AwardTask(p, accuracy)
 	S.BlueprintService.SetVisual(slot, "done")
 	if S.DetailService then
@@ -278,10 +437,10 @@ local function complete(cur: Current, slot: any, p: Instance, accuracy: number)
 			cur.inspecting = true
 			Job.Broadcast()
 			S.InspectionService.Run(cur, function(damage, fallen)
-				finish(true, damage, fallen)
+				finish(cur, true, damage, fallen)
 			end)
 		else
-			finish(true)
+			finish(cur, true)
 		end
 		return
 	end
@@ -293,9 +452,8 @@ local onPrompt_slot: (cur: Current, slot: any) -> ()
 
 -- A rework task added mid-job (ChaosService: re-stack a dropped load, fix an inspector flag).
 -- def is a normal slot def (Id, Kind, Role, Label, Size, Done, Requires...); cleanup is destroyed when it's done.
-function Job.AddSlot(def: any, cf: CFrame, cleanup: Instance?, onDone: ((Instance) -> ())?): any
-	local cur = current
-	if not cur or cur.finishing or cur.slots[def.Id] then
+function Job.AddSlot(cur: Current, def: any, cf: CFrame, cleanup: Instance?, onDone: ((Instance) -> ())?): any
+	if not Job.Live(cur) or cur.finishing or cur.slots[def.Id] then
 		return nil
 	end
 	def.Requires = def.Requires or {}
@@ -312,10 +470,9 @@ function Job.AddSlot(def: any, cf: CFrame, cleanup: Instance?, onDone: ((Instanc
 end
 
 -- Closes a rework slot nobody finished (its time ran out): no credit, no quality record.
-function Job.DropSlot(id: string)
-	local cur = current
-	local slot = cur and cur.slots[id]
-	if not cur or not slot or slot.done then
+function Job.DropSlot(cur: Current, id: string)
+	local slot = cur.slots[id]
+	if not Job.Live(cur) or not slot or slot.done then
 		return
 	end
 	slot.done = true -- a task still running on it ends in nothing (complete() ignores done slots)
@@ -332,7 +489,7 @@ end
 
 -- What the HUD shows as the phase while the job is at inspection (nil = the normal text).
 function Job.SetPhaseNote(cur: Current, note: string?)
-	if current == cur then
+	if Job.Live(cur) then
 		cur.phaseNote = note
 		Job.Broadcast()
 	end
@@ -340,17 +497,17 @@ end
 
 -- Crane mishap: the lift failed, the load lies on the ground. A Laborer re-stacks it before the lift can go again.
 local function onCraneMishap(cur: Current, slot: any, p: Instance, debris: BasePart?)
-	if current ~= cur or cur.finishing or slot.done then
+	if not Job.Live(cur) or cur.finishing or slot.done then
 		if debris then
 			debris:Destroy()
 		end
 		return
 	end
 	slot.busyBy = nil
-	S.QualityService.Record(p, slot.def.Id .. "_mishap", 0.4)
+	S.QualityService.Record(cur.quality, p, slot.def.Id .. "_mishap", 0.4)
 	local id = "restack_" .. slot.def.Id
 	local at = if debris then debris.Position else slot.part.Position
-	Job.AddSlot({
+	Job.AddSlot(cur, {
 		Id = id,
 		Kind = "Timing",
 		Role = "Laborer",
@@ -366,12 +523,12 @@ local function onCraneMishap(cur: Current, slot: any, p: Instance, debris: BaseP
 	refresh(cur)
 	Job.Broadcast()
 	Net.Cue("CrashMetal", at)
-	Toast:FireAllClients("CRANE MISHAP! The load slipped off the hook. Laborer: re-stack it, then the Operator lifts again")
+	Job.Toast(cur, "CRANE MISHAP! The load slipped off the hook. Laborer: re-stack it, then the Operator lifts again")
 end
 
 -- Finishes an equipment task (players and bots): normal motion, or a crane mishap when ChaosService armed one.
 local function finishRig(cur: Current, slot: any, rig: any, p: Instance, acc: number)
-	local mishap = rig.kind == "Crane" and S.ChaosService and S.ChaosService.TakeCraneMishap()
+	local mishap = rig.kind == "Crane" and S.ChaosService and S.ChaosService.TakeCraneMishap(cur)
 	S.EquipmentService.FinishWork(rig, slot, function()
 		complete(cur, slot, p, acc)
 	end, if mishap then function(debris: BasePart?)
@@ -380,19 +537,21 @@ local function finishRig(cur: Current, slot: any, rig: any, p: Instance, acc: nu
 end
 
 -- Chaos blocks (rain: no pouring). Returns the reason or nil.
-local function chaosBlock(slot: any): string?
-	return if S.ChaosService then S.ChaosService.Blocks(slot) else nil
+local function chaosBlock(cur: Current, slot: any): string?
+	return if S.ChaosService then S.ChaosService.Blocks(cur, slot) else nil
 end
 
 local function onPile(cur: Current, p: Instance, item: string, pilePart: BasePart)
-	if current ~= cur or cur.finishing then
+	if not Job.Live(cur) or cur.finishing or not onCrew(cur, p) then
 		return
 	end
 	if S.TaskEngine.IsBusy(p) or not near(p, pilePart.Position, 14) then
 		return
 	end
 	if S.TaskEngine.Carry.Holding(p) then
-		Toast:FireClient(p, "Hands full. Use it or tap Drop first")
+		if p:IsA("Player") then
+			Toast:FireClient(p, "Hands full. Use it or tap Drop first")
+		end
 		return
 	end
 	S.TaskEngine.Carry.PickUp(p, item, cur.bp.Items[item])
@@ -441,22 +600,21 @@ local function doDeliver(cur: Current, slot: any, actor: Instance): (boolean, st
 	cur.trips += 1
 	local have, need = loadProgress(cur)
 	if have >= need then
-		Toast:FireAllClients("Materials delivered! Grab them from the piles")
+		Job.Toast(cur, "Materials delivered! Grab them from the piles")
 		complete(cur, slot, actor, 1)
 	else
-		Toast:FireAllClients(("Trip %d unloaded (%d/%d bundles). Drive back to Crew Supply for the rest"):format(
-			cur.trips, have, need))
+		Job.Toast(cur, ("Trip %d unloaded (%d/%d bundles). Drive back to Crew Supply for the rest"):format(cur.trips, have, need))
 		Job.Broadcast()
 	end
 	return true, nil
 end
 
 -- Rush Delivery (a paid boost for the whole crew, PurchaseService): the supplier trucks whatever is still missing
--- straight to the site. It only skips the hauling: every piece still has to be built by the crew. Can it be used now?
-function Job.CanRush(): (boolean, string?)
-	local cur = current
+-- straight to the buyer's crew's site. It only skips the hauling: every piece still has to be built by the crew.
+function Job.CanRush(p: Player): (boolean, string?)
+	local cur = Job.ForPlayer(p)
 	if not cur or cur.finishing then
-		return false, "Start a job first: Rush Delivery brings that job's materials to the site"
+		return false, "Start a job first: Rush Delivery brings your crew's materials to its site"
 	end
 	local deliver = cur.slots.deliver
 	if not deliver or deliver.done then
@@ -468,8 +626,8 @@ end
 -- Does the same bookkeeping as unloading the last trip (doDeliver): piles for what wasn't on site yet, the truck
 -- emptied, the Deliver slot completed in the buyer's name. Never yields.
 function Job.RushDelivery(buyer: Player): (boolean, string?)
-	local ok, why = Job.CanRush()
-	local cur = current
+	local ok, why = Job.CanRush(buyer)
+	local cur = Job.ForPlayer(buyer)
 	if not ok or not cur then
 		return false, why
 	end
@@ -486,14 +644,14 @@ function Job.RushDelivery(buyer: Player): (boolean, string?)
 			addPile(cur, item, deliveredPilePos(cur, item, slot.def, k))
 		end
 	end
-	Toast:FireAllClients(("RUSH DELIVERY! %s had the materials trucked straight to Site %d. Grab them from the piles"):format(
-		buyer.Name, cur.tier))
+	Job.Toast(cur, ("RUSH DELIVERY! %s had the materials trucked straight to %s. Grab them from the piles"):format(
+		buyer.Name, cur.label))
 	complete(cur, slot, buyer, 1)
 	return true, nil
 end
 
 local function onSlot(cur: Current, p: Player, slot: any)
-	if current ~= cur or cur.finishing or slot.done then
+	if not Job.Live(cur) or cur.finishing or slot.done or not onCrew(cur, p) then
 		return
 	end
 	local def = slot.def
@@ -509,7 +667,7 @@ local function onSlot(cur: Current, p: Player, slot: any)
 		Toast:FireClient(p, "Not ready yet")
 		return
 	end
-	local blocked = chaosBlock(slot)
+	local blocked = chaosBlock(cur, slot)
 	if blocked then
 		Toast:FireClient(p, blocked)
 		return
@@ -521,12 +679,12 @@ local function onSlot(cur: Current, p: Player, slot: any)
 	if S.TaskEngine.IsBusy(p) then
 		return
 	end
-	-- Equipment tasks (excavator holes, crane lifts): the player must be operating that machine within its
-	-- reach. Everything else: the player must be standing close to the slot.
+	-- Equipment tasks (excavator holes, crane lifts): the player must be operating that machine (this site's) within
+	-- its reach. Everything else: the player must be standing close to the slot.
 	local rig: any = nil
 	if def.Equipment then
 		local why
-		rig, why = S.EquipmentService.CheckOperator(p, def.Equipment, slot.part.Position)
+		rig, why = S.EquipmentService.CheckOperator(p, def.Equipment, slot.part.Position, cur.site)
 		if not rig then
 			Toast:FireClient(p, why or "You need the right machine for this")
 			return
@@ -593,9 +751,14 @@ local function onSlot(cur: Current, p: Player, slot: any)
 	end
 end
 
--- Loading at Crew Supply (Workspace.SupplyStore): carry a bundle from a supply stack, then tap the truck bed.
+---------------------------------------------------------------------------------------------------------------
+-- Loading at Crew Supply (Workspace.SupplyStore). Several crews' trucks can load at once: each job has its own
+-- loading flag and yard timer.
+---------------------------------------------------------------------------------------------------------------
+
+-- Carry a bundle from a supply stack, then tap the truck bed.
 local function onLoadTruck(cur: Current, p: Player)
-	if current ~= cur or cur.finishing or not cur.truck then
+	if not Job.Live(cur) or cur.finishing or not cur.truck or not onCrew(cur, p) then
 		return
 	end
 	if cur.slots.deliver and cur.slots.deliver.done then
@@ -630,20 +793,17 @@ local function onLoadTruck(cur: Current, p: Player)
 	S.TaskEngine.Carry.Consume(p)
 	S.VehicleService.AddCargo(cur.truck, item, cur.bp.Items[item])
 	Net.Cue("Place", cur.truck.bed.Position)
-	S.QualityService.Record(p, "load_" .. item, 1)
+	S.QualityService.Record(cur.quality, p, "load_" .. item, 1)
 	S.ProgressionService.AwardTask(p, 1)
 	local have, total = loadProgress(cur)
-	local onTruck, target = tripProgress(cur)
-	if onTruck >= target and have < total then
-		Toast:FireAllClients(("Truck full (%d/%d bundles)! Drive to Site %d; the rest needs another trip"):format(
-			have, total, cur.tier))
+	local onT, target = tripProgress(cur)
+	if onT >= target and have < total then
+		Job.Toast(cur, ("Truck full (%d/%d bundles)! Drive to %s; the rest needs another trip"):format(have, total, cur.label))
 	else
-		Toast:FireAllClients(("Loaded %s (%d/%d)"):format(item, have, total))
+		Job.Toast(cur, ("Loaded %s (%d/%d)"):format(item, have, total))
 	end
 	Job.Broadcast()
 end
-
-local loadingNow = false -- a stack is loading the truck right now (bundles in the air)
 
 -- A bundle flying from a stack into the truck bed (looks only; the cargo is added when it lands). Yields ~0.45 s.
 local function flyBundle(from: BasePart, to: BasePart, def: any)
@@ -680,17 +840,17 @@ end
 -- task credit (XP, quality) per bundle. Toasts the progress and refreshes the HUD when done.
 local function loadBundles(cur: Current, p: Player?, item: string, stack: BasePart, n: number)
 	local truck = cur.truck
-	if not truck or not truck.bed or loadingNow then
+	if not truck or not truck.bed or cur.loading then
 		return
 	end
 	local bed = truck.bed :: BasePart
 	local def = cur.bp.Items[item]
-	loadingNow = true
+	cur.loading = true
 	task.spawn(function()
 		local loaded = 0
 		-- stops when the job ends or its materials are all on site (Rush Delivery can do that mid-flight)
 		local function stillNeeded(): boolean
-			return current == cur and not cur.finishing and truck.model.Parent ~= nil
+			return Job.Live(cur) and not cur.finishing and truck.model.Parent ~= nil
 				and not (cur.slots.deliver and cur.slots.deliver.done)
 		end
 		for _ = 1, n do
@@ -702,34 +862,32 @@ local function loadBundles(cur: Current, p: Player?, item: string, stack: BasePa
 				loaded += 1
 				Net.Cue("Place", bed.Position)
 				if p and p.Parent then
-					S.QualityService.Record(p, "load_" .. item, 1)
+					S.QualityService.Record(cur.quality, p, "load_" .. item, 1)
 					S.ProgressionService.AwardTask(p, 1)
 				end
 			end
 		end
-		loadingNow = false
+		cur.loading = false
 		if not stillNeeded() or loaded == 0 then
 			return
 		end
 		local have, total = loadProgress(cur)
 		local onT, target = tripProgress(cur)
 		if have >= total then
-			Toast:FireAllClients(("All loaded (%d/%d)! Drive to Site %d"):format(have, total, cur.tier))
+			Job.Toast(cur, ("All loaded (%d/%d)! Drive to %s"):format(have, total, cur.label))
 		elseif onT >= target then
-			Toast:FireAllClients(("Truck full (%d/%d bundles)! Drive to Site %d; the rest needs another trip"):format(
-				have, total, cur.tier))
+			Job.Toast(cur, ("Truck full (%d/%d bundles)! Drive to %s; the rest needs another trip"):format(have, total, cur.label))
 		else
-			Toast:FireAllClients(("Loaded %d %s (%d/%d)"):format(loaded, item, have, total))
+			Job.Toast(cur, ("Loaded %d %s (%d/%d)"):format(loaded, item, have, total))
 		end
 		Job.Broadcast()
 	end)
 end
 
--- Holding a stack at Crew Supply loads every bundle of that kind this trip still needs (the truck has to be at the
--- LOADING canopy). The drive-through below does the same on its own, so this is just the manual way.
--- (Carrying a bundle and tapping the bed still works, e.g. for a bundle someone already holds.)
+-- Holding a stack at Crew Supply loads every bundle of that kind this trip still needs into your crew's truck (it
+-- has to be at the LOADING canopy). The drive-through below does the same on its own, so this is the manual way.
 local function onDockStack(p: Player, item: string, stack: BasePart)
-	local cur = current
+	local cur = Job.ForPlayer(p)
 	if not cur or cur.finishing or (cur.slots.deliver and cur.slots.deliver.done) then
 		Toast:FireClient(p, "Start a job at the site board first")
 		return
@@ -740,7 +898,7 @@ local function onDockStack(p: Player, item: string, stack: BasePart)
 		return
 	end
 	local truck = cur.truck
-	if not truck or not truck.bed or loadingNow then
+	if not truck or not truck.bed or cur.loading then
 		return
 	end
 	if S.TaskEngine.IsBusy(p) or not near(p, stack.Position, 12) then
@@ -753,7 +911,7 @@ local function onDockStack(p: Player, item: string, stack: BasePart)
 		return
 	end
 	if not dockPos or (S.VehicleService.Position(truck) - dockPos).Magnitude > DOCK_REACH then
-		Toast:FireClient(p, "Park the truck under the LOADING canopy first, then hold a stack to load it")
+		Toast:FireClient(p, "Park your crew's truck under the LOADING canopy first, then hold a stack to load it")
 		return
 	end
 	local onTruck = tripProgress(cur)
@@ -765,16 +923,13 @@ local function onDockStack(p: Player, item: string, stack: BasePart)
 	loadBundles(cur, p, item, stack, math.min(want, room))
 end
 
--- Drive-through loading (2026-11-12, owner: "the loading is way to hard"): stop the job's truck at Crew Supply (within
--- DOCK_REACH of the dock, nearly still for ~1 s) and the yard loads everything this trip needs, item by item, from
--- the stacks. The driver (else the nearest crew member) gets the task credit. Runs a few times a second.
+-- Drive-through loading (2026-11-12, owner: "the loading is way to hard"): stop a crew's truck at Crew Supply
+-- (within DOCK_REACH of the dock, nearly still for ~1 s) and the yard loads everything this trip needs, item by item,
+-- from the stacks. The driver (else the nearest crewmate) gets the task credit. Runs a few times a second.
 local stacksByItem: { [string]: BasePart } = {}
-local yardLast: Vector3? = nil
-local yardStill = 0
-local function driveThrough()
-	local cur = current
-	if not cur or cur.finishing or not cur.truck or not cur.truck.bed or loadingNow or not dockPos then
-		yardLast, yardStill = nil, 0
+local function driveThroughOne(cur: Current)
+	if cur.finishing or not cur.truck or not cur.truck.bed or cur.loading or not dockPos then
+		cur.yardLast, cur.yardStill = nil, 0
 		return
 	end
 	if cur.slots.deliver and cur.slots.deliver.done then
@@ -783,13 +938,14 @@ local function driveThrough()
 	local truck = cur.truck
 	local pos = S.VehicleService.Position(truck)
 	if (pos - (dockPos :: Vector3)).Magnitude > DOCK_REACH then
-		yardLast, yardStill = nil, 0
+		cur.yardLast, cur.yardStill = nil, 0
 		return
 	end
-	local moved = if yardLast then ((pos - yardLast :: Vector3) * Vector3.new(1, 0, 1)).Magnitude else math.huge
-	yardLast = pos
-	yardStill = if moved < 1.2 then yardStill + 1 else 0 -- under ~3 studs/s at 0.4 s a check
-	if yardStill < 2 then
+	local last = cur.yardLast
+	local moved = if last then ((pos - last) * Vector3.new(1, 0, 1)).Magnitude else math.huge
+	cur.yardLast = pos
+	cur.yardStill = if moved < 1.2 then cur.yardStill + 1 else 0 -- under ~3 studs/s at 0.4 s a check
+	if cur.yardStill < 2 then
 		return
 	end
 	local onTruck = tripProgress(cur)
@@ -802,20 +958,23 @@ local function driveThrough()
 		local want = need - (counts[item] or 0)
 		local stack = stacksByItem[item]
 		if want > 0 and stack then
-			-- credit: whoever is driving, else the nearest crew member in the yard
+			-- credit: whoever is driving, else the nearest crewmate in the yard
 			local occ = truck.seat.Occupant
 			local credit = if occ then Players:GetPlayerFromCharacter(occ.Parent) else nil
+			if credit and S.CrewService.Of(credit) ~= cur.crew then
+				credit = nil
+			end
 			if not credit then
 				local best = 60
-				for _, pl in Players:GetPlayers() do
+				for _, pl in S.CrewService.Members(cur.crew) do
 					local r = rootOf(pl)
 					if r and (r.Position - pos).Magnitude < best then
 						best, credit = (r.Position - pos).Magnitude, pl
 					end
 				end
 			end
-			if yardStill == 2 then
-				Toast:FireAllClients("Loading the truck at Crew Supply...")
+			if cur.yardStill == 2 then
+				Job.Toast(cur, "Loading the truck at Crew Supply...")
 			end
 			loadBundles(cur, credit, item, stack, math.min(want, room))
 			return
@@ -823,28 +982,39 @@ local function driveThrough()
 	end
 end
 
-local function lotCenter(lotId: string): Vector3?
-	for _, lot in TownLayout.Lots do
-		if lot.Id == lotId then
-			return Vector3.new((lot.Min.X + lot.Max.X) / 2, 0, (lot.Min.Y + lot.Max.Y) / 2)
+local function driveThrough()
+	for _, cur in jobs do
+		driveThroughOne(cur)
+	end
+end
+
+---------------------------------------------------------------------------------------------------------------
+-- Starting a job
+---------------------------------------------------------------------------------------------------------------
+
+-- RV lot truck stalls (Stall_1, Stall_2 ...), minus the one the truck dealer uses for its display. Crew n's truck
+-- waits in the n-th one.
+local stalls: { BasePart } = {}
+local function collectStalls(park: Instance)
+	local found: { { k: number, part: BasePart } } = {}
+	local dealerStall = if S.DealerService then S.DealerService.STALL else nil
+	for _, d in park:GetDescendants() do
+		local k = string.match(d.Name, "^Stall_(%d+)$")
+		if k and d:IsA("BasePart") and d.Name ~= dealerStall then
+			table.insert(found, { k = tonumber(k) :: number, part = d })
 		end
 	end
-	return nil
-end
-
--- The crew's truck waits in the RV park truck lot (stall 1); without the RV park it parks at the site.
-local function stallCFrame(): CFrame?
-	local park = workspace:FindFirstChild("RVPark")
-	local stall = park and park:FindFirstChild("Stall_1", true)
-	if stall and stall:IsA("BasePart") then
-		return stall.CFrame
+	table.sort(found, function(a, b)
+		return a.k < b.k
+	end)
+	table.clear(stalls)
+	for _, f in found do
+		table.insert(stalls, f.part)
 	end
-	return nil
 end
 
--- Where crew members appear at the running job's site (next to the inspection clipboard).
-function Job.SiteSpawn(): CFrame?
-	local cur = current
+-- Where crew members appear at a job's site (next to the inspection clipboard).
+function Job.SiteSpawn(cur: Current?): CFrame?
 	if not cur then
 		return nil
 	end
@@ -875,11 +1045,16 @@ function Job.CanStart(p: Player, siteId: string): (boolean, string?)
 	return true, nil
 end
 
--- opts.dropIn: first-timer starter job (no role needed, truck already loaded and parked at the site).
+-- opts.dropIn: a starter job with the truck already loaded and parked at the site (no trade needed).
 function Job.StartJob(p: Player, siteId: string, opts: { dropIn: boolean? }?): boolean
 	local dropIn = opts ~= nil and opts.dropIn == true
-	if current then
-		Toast:FireClient(p, "A job is already running")
+	local crew = S.CrewService.Of(p)
+	if not crew then
+		Toast:FireClient(p, "Pick a trade first: that puts you on a crew")
+		return false
+	end
+	if jobs[crew] then
+		Toast:FireClient(p, "Your crew already has a job running")
 		return false
 	end
 	if not dropIn then
@@ -897,14 +1072,22 @@ function Job.StartJob(p: Player, siteId: string, opts: { dropIn: boolean? }?): b
 		end
 	end
 	local siteCfg = SitesConfig[siteId]
-	local center = lotCenter(siteId)
-	if not siteCfg or not center then
+	if not siteCfg then
 		warn("[Job] unknown site", siteId)
 		return false
 	end
+	local free = freeLots(siteId)
+	local lotId = free[1]
+	local lot = if lotId then Lots.Get(lotId) else nil
+	if not lot or not lotId then
+		Toast:FireClient(p, ("Every Site %d lot has a crew on it right now. Pick another site or try again in a few minutes"):format(siteCfg.Tier))
+		return false
+	end
+	local lotIndex = table.find(siteCfg.Lots, lotId) or 1
+	local label = ("Site %d%s"):format(siteCfg.Tier, Lots.Letter(lotIndex))
 	local cfg = JobsConfig[siteCfg.Job]
 	local bp = require(ReplicatedStorage.Shared.Blueprints:FindFirstChild(cfg.Blueprint) :: ModuleScript) :: any
-	local originCF = CFrame.new(center) * CFrame.Angles(0, siteCfg.Yaw, 0)
+	local originCF = CFrame.new(Lots.Center(lot)) * CFrame.Angles(0, Lots.Yaw(lot), 0)
 
 	-- Materials that ride on the truck don't start at the site.
 	local onTruck: { [string]: boolean } = {}
@@ -912,15 +1095,20 @@ function Job.StartJob(p: Player, siteId: string, opts: { dropIn: boolean? }?): b
 		onTruck[item] = true
 	end
 	local site, slots, piles = S.BlueprintService.Build(bp, workspace, originCF, onTruck)
+	site.Name = ("JobSite_%s_%d"):format(bp.Id, crew.id)
+	site:SetAttribute("CrewId", crew.id) -- clients show each player only their own crew's prompts
+	site:SetAttribute("Lot", lotId)
 	local order = {}
 	for _, def in bp.Slots do
 		table.insert(order, def.Id)
 	end
-	local stall = stallCFrame()
-	local spawnCF = if dropIn or not stall then originCF * bp.Truck.Spawn else stall
+	local stall = stalls[crew.id]
+	local stallNo = if stall then tonumber(string.match(stall.Name, "%d+")) else nil
+	local spawnCF = if dropIn or not stall then originCF * bp.Truck.Spawn else stall.CFrame
 	-- The starter's truck (drop-ins: the starter truck; sites that need a truck: that one).
 	local truckKind = if dropIn then "StarterTruck" else (siteCfg.Truck or S.DataService.SelectedTruck(p))
 	local truck = S.VehicleService.SpawnTruck(spawnCF, site, truckKind)
+	truck.model:SetAttribute("CrewName", crew.name)
 	S.EquipmentService.SpawnFor(bp, originCF, site) -- excavator, crane (bigger houses)
 	if dropIn then
 		for item, n in cfg.Load do
@@ -931,8 +1119,11 @@ function Job.StartJob(p: Player, siteId: string, opts: { dropIn: boolean? }?): b
 	end
 
 	local cur: Current = {
+		crew = crew,
 		id = siteCfg.Job,
 		siteId = siteId,
+		lotId = lotId,
+		label = label,
 		tier = siteCfg.Tier,
 		dropIn = dropIn,
 		originCF = originCF,
@@ -949,11 +1140,16 @@ function Job.StartJob(p: Player, siteId: string, opts: { dropIn: boolean? }?): b
 		roleWorked = {},
 		joined = {},
 		finishing = false,
+		quality = S.QualityService.New(),
+		loading = false,
+		yardLast = nil,
+		yardStill = 0,
 	}
-	for _, pl in Players:GetPlayers() do
-		cur.joined[pl] = cur.startedAt -- everyone here at the start counts from the start
+	for _, pl in S.CrewService.Members(crew) do
+		cur.joined[pl] = cur.startedAt -- everyone on the crew at the start counts from the start
 	end
-	current = cur
+	jobs[crew] = cur
+	lotJob[lotId] = cur
 
 	for _, slot in slots do
 		onPrompt_slot(cur, slot)
@@ -969,12 +1165,10 @@ function Job.StartJob(p: Player, siteId: string, opts: { dropIn: boolean? }?): b
 		onLoadTruck(cur, pl)
 	end)
 
-	S.QualityService.Reset()
 	refresh(cur)
 	Job.Broadcast()
 	if dropIn then
-		Toast:FireAllClients(("Welcome to the crew! %s job at Site %d. %d:00 on the clock"):format(
-			bp.DisplayName, siteCfg.Tier, cfg.Deadline // 60))
+		Job.Toast(cur, ("Welcome to the crew! %s job at %s. %d:00 on the clock"):format(bp.DisplayName, label, cfg.Deadline // 60))
 	else
 		local need = 0
 		for _, n in cfg.Load do
@@ -982,12 +1176,13 @@ function Job.StartJob(p: Player, siteId: string, opts: { dropIn: boolean? }?): b
 		end
 		local cap = S.VehicleService.Capacity(truck)
 		local trips = math.max(1, math.ceil(need / math.max(1, cap)))
-		Toast:FireAllClients(("%s started the %s job at Site %d! Load %d bundles at Crew Supply on Main St (the truck holds %d: %d trip%s), then drive."):format(
-			p.Name, bp.DisplayName, siteCfg.Tier, need, cap, trips, if trips == 1 then "" else "s"))
+		local where = if stallNo then ("Your truck is in stall %d at the truck lot. "):format(stallNo) else "Your truck is at the site. "
+		Job.Toast(cur, ("%s started the %s job at %s! %sLoad %d bundles at Crew Supply on Main St (the truck holds %d: %d trip%s), then drive."):format(
+			p.Name, bp.DisplayName, label, where, need, cap, trips, if trips == 1 then "" else "s"))
 	end
 	-- firstJob: started by someone who hasn't been paid yet (ChaosService keeps a newcomer's first job calm)
 	local starterProfile = S.DataService.Get(p)
-	Job.Started:Fire(siteId, dropIn, starterProfile ~= nil and starterProfile.FirstPayout ~= true)
+	Job.Started:Fire(cur, dropIn, starterProfile ~= nil and starterProfile.FirstPayout ~= true)
 	return true
 end
 
@@ -997,23 +1192,51 @@ onPrompt_slot = function(cur: Current, slot: any)
 	end)
 end
 
-finish = function(success: boolean, damage: { [Player]: number }?, fallen: number?)
-	local cur = current
-	if not cur or cur.finishing then
+---------------------------------------------------------------------------------------------------------------
+-- Finishing
+---------------------------------------------------------------------------------------------------------------
+
+-- Tears the site down and frees the lot (after the payout screen, or at once when the crew is gone).
+local function teardown(cur: Current)
+	if jobs[cur.crew] ~= cur then
+		return
+	end
+	for _, pl in S.CrewService.Members(cur.crew) do
+		S.TaskEngine.Carry.Drop(pl)
+	end
+	S.EquipmentService.Clear(cur.site)
+	S.VehicleService.DespawnIn(cur.site)
+	cur.site:Destroy()
+	jobs[cur.crew] = nil
+	if lotJob[cur.lotId] == cur then
+		lotJob[cur.lotId] = nil
+	end
+	S.CrewService.MarkIdle(cur.crew)
+	Job.Broadcast()
+	Job.Cleared:Fire(cur)
+end
+
+finish = function(cur: Current, success: boolean, damage: { [Player]: number }?, fallen: number?)
+	if not Job.Live(cur) or cur.finishing then
 		return
 	end
 	cur.finishing = true
-	S.TaskEngine.CancelAll("The job is over")
+	local members = S.CrewService.Members(cur.crew)
+	for _, pl in members do
+		S.TaskEngine.Cancel(pl, "The job is over")
+	end
 	local timeLeft = math.max(0, cur.deadlineAt - workspace:GetServerTimeNow())
 
 	if success then
-		local avg = S.QualityService.Average()
+		local Q = S.QualityService
+		local avg = Q.Average(cur.quality)
+		local grade = Q.Grade(avg)
 		local pay, parts = S.EconomyService.ComputePayout(cur.cfg, avg, timeLeft)
-		local contributors = S.QualityService.Contributors()
+		local contributors = Q.Contributors(cur.quality)
 		-- Surprise inspector: every flagged mistake nobody fixed comes off each paycheck.
 		local fine, flags = 0, 0
 		if S.ChaosService then
-			fine, flags = S.ChaosService.Fines(cur.cfg)
+			fine, flags = S.ChaosService.Fines(cur, cur.cfg)
 		end
 		-- Fair share (EconomyService.PayShare): how many tasks each trade has on this job, and how long it ran.
 		local roleTotals: { [string]: number } = {}
@@ -1022,13 +1245,13 @@ finish = function(success: boolean, damage: { [Player]: number }?, fallen: numbe
 		end
 		local nowClock = os.clock()
 		local jobSeconds = nowClock - cur.startedAt
-		-- the trade each player mostly worked, and how many players mainly worked each trade
+		-- the trade each member mostly worked, and how many members mainly worked each trade
 		local mainRoleOf: { [Player]: string } = {}
 		local workers: { [string]: number } = {}
-		for _, pl in Players:GetPlayers() do
+		for _, pl in members do
 			local mine: { [string]: number } = {}
 			local best: string?, bestN = nil, 0
-			for _, id in S.QualityService.TasksOf(pl) do
+			for _, id in Q.TasksOf(cur.quality, pl) do
 				local slot = cur.slots[id]
 				if slot then
 					local r = slot.def.Role
@@ -1044,7 +1267,7 @@ finish = function(success: boolean, damage: { [Player]: number }?, fallen: numbe
 			end
 		end
 		local paidPlayers: { Player } = {}
-		for _, pl in Players:GetPlayers() do
+		for _, pl in members do
 			local tasks = contributors[pl] or 0
 			local myDamage = if damage then damage[pl] or 0 else 0
 			-- the trade this player mostly worked decides how many tasks a full paycheck needs
@@ -1052,7 +1275,7 @@ finish = function(success: boolean, damage: { [Player]: number }?, fallen: numbe
 			local need = S.EconomyService.TasksForFullPay(cur.cfg, #cur.order,
 				if mainRole then roleTotals[mainRole] or 0 else 0, if mainRole then workers[mainRole] or 1 else 1)
 			local share, shareWhy = S.EconomyService.PayShare(cur.cfg, tasks, need,
-				nowClock - (cur.joined[pl] or cur.startedAt), jobSeconds)
+				nowClock - (cur.joined[pl] or nowClock), jobSeconds)
 			local gross = math.floor(pay * share + 0.5)
 			local net = if tasks > 0 then math.max(0, gross - fine - myDamage) else 0
 			-- 2x Pay game pass: the buyer's own paycheck only (EconomyService asks PurchaseService; 1 or 2, never more)
@@ -1066,7 +1289,7 @@ finish = function(success: boolean, damage: { [Player]: number }?, fallen: numbe
 					table.insert(paidPlayers, pl)
 					S.ProgressionService.AwardJob(pl)
 				end
-				S.DataService.RecordJob(pl, earned, S.QualityService.Grade(avg))
+				S.DataService.RecordJob(pl, earned, grade)
 				if S.DataService.MarkFirstPayout(pl) then
 					note = "First paycheck! Your own RV at the RV park is unlocked: next shift starts there."
 				end
@@ -1077,7 +1300,7 @@ finish = function(success: boolean, damage: { [Player]: number }?, fallen: numbe
 			PayoutEvent:FireClient(pl, {
 				success = true,
 				job = cur.bp.DisplayName,
-				grade = S.QualityService.Grade(avg),
+				grade = grade,
 				accuracy = avg,
 				quality = parts.quality,
 				early = parts.early,
@@ -1098,44 +1321,48 @@ finish = function(success: boolean, damage: { [Player]: number }?, fallen: numbe
 		end
 		-- company points for everyone who was paid (CompanyService)
 		if S.CompanyService and #paidPlayers > 0 then
-			S.CompanyService.AddJob(paidPlayers, cur.cfg.BasePay, S.QualityService.Grade(avg))
+			S.CompanyService.AddJob(paidPlayers, cur.cfg.BasePay, grade)
 		end
 	else
-		PayoutEvent:FireAllClients({ success = false, job = cur.bp.DisplayName, note = "Out of time! The client walked off the job." })
+		for _, pl in members do
+			PayoutEvent:FireClient(pl, { success = false, job = cur.bp.DisplayName, note = "Out of time! The client walked off the job." })
+		end
 	end
 	-- The Awake buff lasts for one job.
-	S.BuffService.EndJob()
+	S.BuffService.EndJob(members)
 	Job.Broadcast()
-	Job.Ended:Fire(success)
+	Job.Ended:Fire(cur, success)
 
-	task.delay(CLEANUP_DELAY, function()
-		if current ~= cur then
-			return
-		end
-		S.TaskEngine.Carry.DropAll()
-		S.EquipmentService.Clear()
-		S.VehicleService.DespawnAll()
-		cur.site:Destroy()
-		current = nil
-		Job.Broadcast()
-		Job.Cleared:Fire()
-	end)
+	task.delay(CLEANUP_DELAY, teardown, cur)
+end
+
+-- The crew is gone (last member left): end its job without pay and free the lot now.
+local function abandon(crew: any)
+	local cur = jobs[crew]
+	if not cur then
+		return
+	end
+	if not cur.finishing then
+		cur.finishing = true
+		Job.Ended:Fire(cur, false)
+	end
+	teardown(cur)
 end
 
 ---------------------------------------------------------------------------------------------------------------
 -- Bot workers (BotService). Bots go through the same slot rules as players: their trade, requirements done,
 -- nobody else on it, close enough or operating the right machine. Only the minigame input is simulated.
+-- Every entry point takes the bot's job, so a bot only ever works its own crew's site.
 ---------------------------------------------------------------------------------------------------------------
 
 -- Open, unclaimed slots for a trade, nearest first.
-function Job.OpenSlotsFor(role: string, from: Vector3): { any }
-	local cur = current
+function Job.OpenSlotsFor(cur: Current, role: string, from: Vector3): { any }
 	local out = {}
-	if not cur or cur.finishing then
+	if not Job.Live(cur) or cur.finishing then
 		return out
 	end
 	for _, slot in cur.slots do
-		if not slot.done and slot.open and not slot.busyBy and slot.def.Role == role and not chaosBlock(slot) then
+		if not slot.done and slot.open and not slot.busyBy and slot.def.Role == role and not chaosBlock(cur, slot) then
 			table.insert(out, slot)
 		end
 	end
@@ -1149,10 +1376,9 @@ end
 -- a task of that trade for `seconds` either (bot work doesn't count). BotService sends a helper bot to a trade a
 -- player holds but isn't working (CLAUDE.md: no trade idle more than a minute). Deliveries are left out: the crew
 -- is busy loading and driving then.
-function Job.StalledRoles(seconds: number): { [string]: boolean }
+function Job.StalledRoles(cur: Current, seconds: number): { [string]: boolean }
 	local out: { [string]: boolean } = {}
-	local cur = current
-	if not cur or cur.finishing or cur.inspecting then
+	if not Job.Live(cur) or cur.finishing or cur.inspecting then
 		return out
 	end
 	local now = os.clock()
@@ -1162,7 +1388,7 @@ function Job.StalledRoles(seconds: number): { [string]: boolean }
 	for _, slot in cur.slots do
 		local role = slot.def.Role
 		if not out[role] and not slot.done and slot.open and not slot.busyBy and slot.def.Kind ~= "Deliver"
-			and not chaosBlock(slot)
+			and not chaosBlock(cur, slot)
 			and now - (slot.openedAt or cur.startedAt) >= seconds
 			and now - (cur.roleWorked[role] or cur.startedAt) >= seconds then
 			out[role] = true
@@ -1172,13 +1398,11 @@ function Job.StalledRoles(seconds: number): { [string]: boolean }
 end
 
 -- Has a player finished a task of this trade since `t` (os.clock)?
-function Job.PlayerWorkedSince(role: string, t: number): boolean
-	local cur = current
-	return cur ~= nil and (cur.roleWorked[role] or 0) > t
+function Job.PlayerWorkedSince(cur: Current, role: string, t: number): boolean
+	return (cur.roleWorked[role] or 0) > t
 end
 
-function Job.UsesRole(role: string): boolean
-	local cur = current
+function Job.UsesRole(cur: Current?, role: string): boolean
 	if not cur then
 		return false
 	end
@@ -1190,32 +1414,26 @@ function Job.UsesRole(role: string): boolean
 	return false
 end
 
-function Job.LoadReady(): boolean
-	local cur = current
-	if not cur then
-		return false
-	end
+function Job.LoadReady(cur: Current): boolean
 	local onTruck, target = tripProgress(cur)
 	return onTruck > 0 and onTruck >= target -- a full truck (or the last of the load) is ready to unload
 end
 
-local function botCan(cur: Current?, role: string, slot: any): boolean
-	return cur ~= nil and current == cur and not cur.finishing and not slot.done and not slot.busyBy
-		and slot.def.Role == role and requirementsMet(cur, slot) and not chaosBlock(slot)
+local function botCan(cur: Current, role: string, slot: any): boolean
+	return Job.Live(cur) and not cur.finishing and not slot.done and not slot.busyBy
+		and slot.def.Role == role and requirementsMet(cur, slot) and not chaosBlock(cur, slot)
 end
 
-function Job.BotPickUp(bot: Model, item: string): boolean
-	local cur = current
-	local pile = cur and cur.site:FindFirstChild("Pile_" .. item)
-	if not cur or not pile or not pile:IsA("BasePart") then
+function Job.BotPickUp(cur: Current, bot: Model, item: string): boolean
+	local pile = cur.site:FindFirstChild("Pile_" .. item)
+	if not Job.Live(cur) or not pile or not pile:IsA("BasePart") then
 		return false
 	end
 	onPile(cur, bot, item, pile)
 	return S.TaskEngine.Carry.Holding(bot) == item
 end
 
-function Job.BotPlace(bot: Model, role: string, slot: any): boolean
-	local cur = current
+function Job.BotPlace(cur: Current, bot: Model, role: string, slot: any): boolean
 	if not botCan(cur, role, slot) or slot.def.Kind ~= "Place" then
 		return false
 	end
@@ -1223,20 +1441,19 @@ function Job.BotPlace(bot: Model, role: string, slot: any): boolean
 		return false
 	end
 	S.TaskEngine.Carry.Consume(bot)
-	complete(cur :: Current, slot, bot, 1)
+	complete(cur, slot, bot, 1)
 	return true
 end
 
 -- Claims a Timing / Connect / Inspect slot for a bot. Returns the machine rig for equipment tasks.
-function Job.BotBegin(bot: Model, role: string, slot: any): (boolean, any)
-	local cur = current
+function Job.BotBegin(cur: Current, bot: Model, role: string, slot: any): (boolean, any)
 	if not botCan(cur, role, slot) then
 		return false, nil
 	end
 	local def = slot.def
 	local rig: any = nil
 	if def.Equipment then
-		rig = S.EquipmentService.CheckOperator(bot, def.Equipment, slot.part.Position)
+		rig = S.EquipmentService.CheckOperator(bot, def.Equipment, slot.part.Position, cur.site)
 		if not rig then
 			return false, nil
 		end
@@ -1246,9 +1463,8 @@ function Job.BotBegin(bot: Model, role: string, slot: any): (boolean, any)
 	slot.busyBy = bot
 	if rig then
 		-- the bot runs the machine through the same hand controls (EquipmentService.Autopilot)
-		local c = cur :: Current
 		S.EquipmentService.BeginManual(rig, slot, bot, function(acc: number)
-			finishRig(c, slot, rig, bot, acc)
+			finishRig(cur, slot, rig, bot, acc)
 		end, function()
 			if slot.busyBy == bot then
 				slot.busyBy = nil
@@ -1259,9 +1475,8 @@ function Job.BotBegin(bot: Model, role: string, slot: any): (boolean, any)
 	return true, rig
 end
 
-function Job.BotFinish(bot: Model, slot: any, accuracy: number, rig: any)
-	local cur = current
-	if not cur or slot.busyBy ~= bot then
+function Job.BotFinish(cur: Current, bot: Model, slot: any, accuracy: number, rig: any)
+	if not Job.Live(cur) or slot.busyBy ~= bot then
 		return
 	end
 	if rig then
@@ -1280,15 +1495,18 @@ function Job.BotAbort(bot: Model, slot: any, rig: any)
 	end
 end
 
-function Job.BotDeliver(bot: Model, slot: any): boolean
-	local cur = current
+function Job.BotDeliver(cur: Current, bot: Model, slot: any): boolean
 	if not botCan(cur, "Operator", slot) or slot.def.Kind ~= "Deliver" then
 		return false
 	end
-	return (doDeliver(cur :: Current, slot, bot))
+	return (doDeliver(cur, slot, bot))
 end
 
--- Site buttons at the RV park site board (map parts with a StartSite attribute, built by DevTools/SiteBuilder).
+---------------------------------------------------------------------------------------------------------------
+-- Map hooks
+---------------------------------------------------------------------------------------------------------------
+
+-- Site buttons at the RV park site board (map parts with a StartSite attribute = a tier key).
 local function hookSiteButton(button: BasePart)
 	local siteId = button:GetAttribute("StartSite")
 	local siteCfg = if typeof(siteId) == "string" then SitesConfig[siteId] else nil
@@ -1308,11 +1526,11 @@ local function hookSiteButton(button: BasePart)
 		if not S.TaskEngine.Guard.Allow(p, "StartJob", 1) or not near(p, button.Position, 12) then
 			return
 		end
-		-- Everyone joins at the RV park: if a crew is already working at this site, the button is a ride out there.
-		local cur = current
+		-- Everyone joins at the RV park: if your crew is already working this site, the button is a ride out there.
+		local cur = Job.ForPlayer(p)
 		if cur and not cur.finishing then
 			if cur.siteId == siteId then
-				local cf = Job.SiteSpawn()
+				local cf = Job.SiteSpawn(cur)
 				local c = p.Character
 				if cf and c and not S.TaskEngine.IsBusy(p) and not S.TaskEngine.Carry.Holding(p) then
 					local to = cf * CFrame.new(math.random(-4, 4), 0, math.random(-3, 3))
@@ -1320,10 +1538,10 @@ local function hookSiteButton(button: BasePart)
 					if S.MoveGuard then
 						S.MoveGuard.Snap(p, to.Position) -- the server moved them: that spot is trusted
 					end
-					Toast:FireClient(p, ("Crew shuttle: you're at Site %d. Pick a trade and help out!"):format(cur.tier))
+					Toast:FireClient(p, ("Crew shuttle: you're at %s. Pick a trade and help out!"):format(cur.label))
 				end
 			else
-				Toast:FireClient(p, ("A crew is working at Site %d: tap the Site %d button to ride out"):format(cur.tier, cur.tier))
+				Toast:FireClient(p, ("Your crew is working at %s: tap the Site %d button to ride out"):format(cur.label, cur.tier))
 			end
 			return
 		end
@@ -1331,7 +1549,7 @@ local function hookSiteButton(button: BasePart)
 	end)
 end
 
--- Dock stacks (map parts with a MaterialStack attribute, built by DevTools/RVParkBuilder).
+-- Dock stacks (map parts with a MaterialStack attribute).
 local function hookDockStack(stack: BasePart)
 	local item = stack:GetAttribute("MaterialStack")
 	if typeof(item) ~= "string" then
@@ -1356,13 +1574,35 @@ local function hookDockStack(stack: BasePart)
 	end)
 end
 
+-- Keeps each job's "joined" times in step with its crew (pay share by time): a member who joins mid-job counts from
+-- then; one who leaves the crew drops out of the payout.
+local function syncJoined(crew: any)
+	local cur = jobs[crew]
+	if not cur then
+		return
+	end
+	local now = os.clock()
+	for _, pl in S.CrewService.Members(crew) do
+		if not cur.joined[pl] then
+			cur.joined[pl] = now
+		end
+	end
+	for pl in cur.joined do
+		if S.CrewService.Of(pl) ~= crew then
+			cur.joined[pl] = nil
+		end
+	end
+end
+
 function Job.Start()
 	StateEvent = Net.Event("State")
+	BoardEvent = Net.Event("Crews")
 	Toast = Net.Event("Toast")
 	PayoutEvent = Net.Event("Payout")
 
 	local park = workspace:WaitForChild("RVPark", 10)
 	if park then
+		collectStalls(park)
 		for _, d in park:GetDescendants() do
 			if d:IsA("BasePart") then
 				if d:GetAttribute("StartSite") ~= nil then
@@ -1392,17 +1632,15 @@ function Job.Start()
 	else
 		warn("[Job] No Workspace.SupplyStore: trucks can only load at an old RV park dock")
 	end
-	do
-		task.spawn(function()
-			while true do
-				task.wait(0.4)
-				local ok, err = pcall(driveThrough)
-				if not ok then
-					warn("[Job] drive-through loading:", err)
-				end
+	task.spawn(function()
+		while true do
+			task.wait(0.4)
+			local ok, err = pcall(driveThrough)
+			if not ok then
+				warn("[Job] drive-through loading:", err)
 			end
-		end)
-	end
+		end
+	end)
 
 	-- Studio-only test hook (server side; clients can't reach ServerStorage).
 	if RunService:IsStudio() then
@@ -1424,33 +1662,37 @@ function Job.Start()
 		hook.Parent = ServerStorage
 	end
 
-	-- Pay share by time: someone who joins while a job is running counts from now, not from the job's start.
-	Players.PlayerAdded:Connect(function(p)
-		local cur = current
-		if cur then
-			cur.joined[p] = os.clock()
-		end
-	end)
-	Players.PlayerRemoving:Connect(function(p)
-		local cur = current
-		if cur then
-			cur.joined[p] = nil
-		end
-	end)
-
 	Net.Event("Hello").OnServerEvent:Connect(function(p)
 		if S.TaskEngine.Guard.Allow(p, "Hello", 1) then
-			StateEvent:FireClient(p, snapshot())
+			StateEvent:FireClient(p, snapshot(S.CrewService.Of(p)))
+			BoardEvent:FireClient(p, board())
 		end
 	end)
-	S.CrewService.Changed.Event:Connect(Job.Broadcast)
+	S.CrewService.Changed.Event:Connect(function(crew)
+		syncJoined(crew)
+		Job.Broadcast()
+	end)
+	S.CrewService.Emptied.Event:Connect(function(crew)
+		abandon(crew)
+		Job.Broadcast()
+	end)
+	Players.PlayerRemoving:Connect(function()
+		Job.Broadcast()
+	end)
 
-	-- Deadline watcher
+	-- Deadline watcher, and a slow refresh of the board (phases change as trucks drive)
+	local tick = 0
 	while true do
 		task.wait(1)
-		local cur = current
-		if cur and not cur.finishing and not cur.inspecting and workspace:GetServerTimeNow() >= cur.deadlineAt then
-			finish(false)
+		local now = workspace:GetServerTimeNow()
+		for _, cur in Job.All() do
+			if not cur.finishing and not cur.inspecting and now >= cur.deadlineAt then
+				finish(cur, false)
+			end
+		end
+		tick += 1
+		if tick % 3 == 0 and next(jobs) ~= nil then
+			Job.Broadcast()
 		end
 	end
 end

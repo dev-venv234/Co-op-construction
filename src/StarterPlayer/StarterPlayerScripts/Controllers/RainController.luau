@@ -1,6 +1,7 @@
 --!strict
--- Rain delay (ChaosService): while workspace.RainUntil is in the future, rain falls around the camera and a
--- banner counts down. Display only; the server decides when it rains and blocks the pours.
+-- Rain delay (ChaosService): while the player attribute RainUntil is in the future (it rains on your crew's job
+-- only), rain falls around the camera and a banner counts down; DayNightController darkens the sky. Display only;
+-- the server decides when it rains and blocks the pours.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
@@ -70,7 +71,7 @@ local function build()
 end
 
 local function update()
-	local untilAt = workspace:GetAttribute("RainUntil")
+	local untilAt = player:GetAttribute("RainUntil")
 	local left = if typeof(untilAt) == "number" then untilAt - workspace:GetServerTimeNow() else 0
 	if left <= 0 then
 		emitter.Enabled = false
@@ -104,7 +105,7 @@ end
 
 function Rain.Start()
 	build()
-	workspace:GetAttributeChangedSignal("RainUntil"):Connect(watch)
+	player:GetAttributeChangedSignal("RainUntil"):Connect(watch)
 	watch()
 end
 

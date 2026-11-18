@@ -3,7 +3,9 @@
 --  * QUICK JOIN: the server gives you the trade the crew needs most.
 --  * PING: pick "Here" / "Need help" / "Bring lumber" / "Watch out"; the marker goes where your camera is looking
 --    and the whole crew sees it for a few seconds (no typing needed).
---  * CREW: list of players with a KICK button (a vote: most of the crew has to agree, the Foreman included).
+--  * CREW: your crew with KICK buttons (a vote: most of the crew has to agree, the Foreman included) and LEAVE, and
+--    every crew on the server (what it's building, which trades it needs) with JOIN, plus NEW CREW. (2026-11-17:
+--    several crews per server; the server checks everything in CrewService.)
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris = game:GetService("Debris")
@@ -166,17 +168,17 @@ function Crew.Start()
 	end)
 	Net.Event("PingShown").OnClientEvent:Connect(showPing)
 
-	-- Crew list with KICK buttons
+	-- CREW panel: my crew (KICK votes, LEAVE) and every crew on the server (JOIN), plus NEW CREW.
 	local panel = Instance.new("Frame")
 	panel.AnchorPoint = Vector2.new(0.5, 0.5)
 	panel.Position = UDim2.fromScale(0.5, 0.5)
-	panel.Size = UDim2.new(0.6, 0, 0.6, 0)
+	panel.Size = UDim2.new(0.92, 0, 0.86, 0)
 	panel.BackgroundColor3 = DARK
 	panel.Visible = false
 	panel.Parent = gui
 	Instance.new("UICorner").Parent = panel
 	local limit = Instance.new("UISizeConstraint")
-	limit.MaxSize = Vector2.new(460, 420)
+	limit.MaxSize = Vector2.new(560, 560)
 	limit.Parent = panel
 	local title = Instance.new("TextLabel")
 	title.BackgroundTransparency = 1
@@ -186,7 +188,7 @@ function Crew.Start()
 	title.TextScaled = true
 	title.TextXAlignment = Enum.TextXAlignment.Left
 	title.TextColor3 = Color3.new(1, 1, 1)
-	title.Text = "YOUR CREW"
+	title.Text = "CREWS"
 	title.Parent = panel
 	local close = button("X", Color3.fromRGB(120, 50, 50), UDim2.fromOffset(48, 44), UDim2.new(1, -56, 0, 6), panel)
 	close.Activated:Connect(function()
@@ -195,22 +197,24 @@ function Crew.Start()
 	local rows = Instance.new("ScrollingFrame")
 	rows.BackgroundTransparency = 1
 	rows.Position = UDim2.new(0, 10, 0, 56)
-	rows.Size = UDim2.new(1, -20, 1, -96)
+	rows.Size = UDim2.new(1, -20, 1, -118)
 	rows.AutomaticCanvasSize = Enum.AutomaticSize.Y
 	rows.CanvasSize = UDim2.new()
 	rows.ScrollBarThickness = 6
 	rows.Parent = panel
 	local rl = Instance.new("UIListLayout")
 	rl.Padding = UDim.new(0, 6)
+	rl.SortOrder = Enum.SortOrder.LayoutOrder
 	rl.Parent = rows
-	local hint = Instance.new("TextLabel")
-	hint.BackgroundTransparency = 1
-	hint.Position = UDim2.new(0, 12, 1, -36)
-	hint.Size = UDim2.new(1, -24, 0, 28)
-	hint.Font = Enum.Font.GothamBold
-	hint.TextScaled = true
-	hint.TextColor3 = Color3.fromRGB(180, 180, 190)
-	hint.Parent = panel
+	-- bottom bar: NEW CREW / LEAVE CREW
+	local newBtn = button("NEW CREW", Color3.fromRGB(60, 140, 80), UDim2.new(0.5, -15, 0, 48), UDim2.new(0, 10, 1, -56), panel)
+	newBtn.Activated:Connect(function()
+		Net.Event("CrewAction"):FireServer("New")
+	end)
+	local leaveBtn = button("LEAVE CREW", Color3.fromRGB(150, 70, 50), UDim2.new(0.5, -15, 0, 48), UDim2.new(0.5, 5, 1, -56), panel)
+	leaveBtn.Activated:Connect(function()
+		Net.Event("CrewAction"):FireServer("Leave")
+	end)
 
 	local function roleOf(name: string): string?
 		for role, names in UI.State.roles or {} do
@@ -220,36 +224,98 @@ function Crew.Start()
 		end
 		return nil
 	end
+	local order = 0
+	local function text(parent: Instance, t: string, pos: UDim2, size: UDim2, font: Enum.Font, color: Color3): TextLabel
+		local l = Instance.new("TextLabel")
+		l.BackgroundTransparency = 1
+		l.Position = pos
+		l.Size = size
+		l.Font = font
+		l.TextScaled = true
+		l.TextXAlignment = Enum.TextXAlignment.Left
+		l.TextColor3 = color
+		l.Text = t
+		l.Parent = parent
+		return l
+	end
+	local function row(height: number, color: Color3): Frame
+		order += 1
+		local r = Instance.new("Frame")
+		r.LayoutOrder = order
+		r.Size = UDim2.new(1, -8, 0, height)
+		r.BackgroundColor3 = color
+		r.Parent = rows
+		Instance.new("UICorner").Parent = r
+		return r
+	end
+	local function header(t: string)
+		order += 1
+		local h = text(rows, t, UDim2.new(), UDim2.new(1, -8, 0, 24), Enum.Font.GothamBlack, Color3.fromRGB(255, 205, 90))
+		h.LayoutOrder = order
+	end
+
 	local function refresh()
 		for _, c in rows:GetChildren() do
-			if c:IsA("Frame") then
+			if c:IsA("Frame") or c:IsA("TextLabel") then
 				c:Destroy()
 			end
 		end
-		local imForeman = UI.MyRole() == "Foreman"
-		hint.Text = if imForeman then "KICK starts a vote: most of the crew has to agree (yours counts like anyone's)"
-			else "KICK starts a vote: most of the crew has to agree"
-		for _, pl in Players:GetPlayers() do
-			local row = Instance.new("Frame")
-			row.Size = UDim2.new(1, -8, 0, 48)
-			row.BackgroundColor3 = Color3.fromRGB(45, 46, 54)
-			row.Parent = rows
-			Instance.new("UICorner").Parent = row
-			local role = roleOf(pl.Name)
-			local nameL = Instance.new("TextLabel")
-			nameL.BackgroundTransparency = 1
-			nameL.Position = UDim2.new(0, 10, 0, 4)
-			nameL.Size = UDim2.new(1, -120, 1, -8)
-			nameL.Font = Enum.Font.GothamBold
-			nameL.TextScaled = true
-			nameL.TextXAlignment = Enum.TextXAlignment.Left
-			nameL.TextColor3 = if role and Trades.Info[role] then Trades.Info[role].Color else Color3.new(1, 1, 1)
-			nameL.Text = pl.DisplayName .. "  -  " .. (role or "no trade") .. (if pl == player then " (you)" else "")
-			nameL.Parent = row
-			if pl ~= player then
-				local kick = button("KICK", Color3.fromRGB(150, 50, 50), UDim2.fromOffset(96, 40), UDim2.new(1, -102, 0, 4), row)
-				kick.Activated:Connect(function()
-					Net.Event("KickVote"):FireServer(pl.Name)
+		order = 0
+		local myId = player:GetAttribute("CrewId")
+		local myName = player:GetAttribute("CrewName")
+		title.Text = if typeof(myName) == "string" then string.upper(myName) else "CREWS"
+		leaveBtn.Visible = myId ~= nil
+
+		-- my crew: members with KICK (a vote)
+		if myId ~= nil then
+			header("YOUR CREW  -  KICK starts a vote: most of the crew has to agree")
+			for _, pl in Players:GetPlayers() do
+				if pl:GetAttribute("CrewId") == myId then
+					local r = row(48, Color3.fromRGB(45, 46, 54))
+					local role = roleOf(pl.Name)
+					text(r, pl.DisplayName .. "  -  " .. (role or "no trade") .. (if pl == player then " (you)" else ""),
+						UDim2.new(0, 10, 0, 6), UDim2.new(1, -120, 1, -12), Enum.Font.GothamBold,
+						if role and Trades.Info[role] then Trades.Info[role].Color else Color3.new(1, 1, 1))
+					if pl ~= player then
+						local kick = button("KICK", Color3.fromRGB(150, 50, 50), UDim2.fromOffset(96, 44), UDim2.new(1, -102, 0, 2), r)
+						kick.Activated:Connect(function()
+							Net.Event("KickVote"):FireServer(pl.Name)
+						end)
+					end
+				end
+			end
+		end
+
+		-- every crew on the server
+		local board = UI.Board or {}
+		local crews = board.crews or {}
+		header(("CREWS ON THIS SERVER (%d/%d)"):format(#crews, tonumber(board.maxCrews) or 6))
+		if #crews == 0 then
+			local r = row(40, Color3.fromRGB(40, 41, 48))
+			text(r, "No crews yet: pick a trade or tap NEW CREW to start one", UDim2.new(0, 10, 0, 8), UDim2.new(1, -20, 1, -16),
+				Enum.Font.Gotham, Color3.fromRGB(200, 205, 215))
+		end
+		for _, c in crews do
+			local mine = c.id == myId
+			local r = row(76, if mine then Color3.fromRGB(40, 70, 55) else Color3.fromRGB(45, 46, 54))
+			text(r, ("%s  (%d/%d)%s"):format(tostring(c.name), c.count or 0, c.max or 6, if mine then "  - yours" else ""),
+				UDim2.new(0, 10, 0, 4), UDim2.new(1, -124, 0, 24), Enum.Font.GothamBlack, Color3.new(1, 1, 1))
+			local doing = if c.job then ("%s at %s: %s (%d/%d)"):format(tostring(c.job), tostring(c.lot), tostring(c.phase), c.done or 0, c.total or 0)
+				else "At camp, picking a job"
+			text(r, doing, UDim2.new(0, 10, 0, 30), UDim2.new(1, -124, 0, 18), Enum.Font.Gotham, Color3.fromRGB(205, 210, 220))
+			local open = c.open or {}
+			text(r, if #open > 0 then "Needs: " .. table.concat(open, ", ") else "Every trade taken",
+				UDim2.new(0, 10, 0, 52), UDim2.new(1, -124, 0, 18), Enum.Font.GothamBold, Color3.fromRGB(255, 190, 90))
+			if not mine then
+				local full = (c.count or 0) >= (c.max or 6)
+				local join = button(if full then "FULL" else "JOIN", if full then Color3.fromRGB(70, 74, 86) else Color3.fromRGB(60, 110, 190),
+					UDim2.fromOffset(104, 56), UDim2.new(1, -112, 0, 10), r)
+				join.AutoButtonColor = not full
+				local id = c.id
+				join.Activated:Connect(function()
+					if not full then
+						Net.Event("CrewAction"):FireServer("Join", id)
+					end
 				end)
 			end
 		end
@@ -260,12 +326,19 @@ function Crew.Start()
 			refresh()
 		end
 	end)
-	UI.StateChanged.Event:Connect(function()
+	local function changed()
 		quick.Visible = UI.MyRole() == nil or UI.State.active == true
 		if panel.Visible then
 			refresh()
 		end
+	end
+	UI.StateChanged.Event:Connect(changed)
+	UI.BoardChanged.Event:Connect(function()
+		if panel.Visible then
+			refresh()
+		end
 	end)
+	player:GetAttributeChangedSignal("CrewId"):Connect(changed)
 end
 
 return Crew

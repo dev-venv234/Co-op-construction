@@ -185,6 +185,10 @@ local function boardPrompt(rig: Rig, part: BasePart, text: string)
 			return
 		end
 		local Toast = Net.Event("Toast")
+		if not S.JobService.MayUse(p, rig.model) then
+			Toast:FireClient(p, "That's another crew's " .. string.lower(rig.kind))
+			return
+		end
 		if not S.CrewService.CanDo(p, "Operator") then
 			Toast:FireClient(p, "Only the Operator runs the " .. string.lower(rig.kind))
 			return
@@ -819,7 +823,10 @@ local function setUp(rig: Rig, snap: boolean?)
 		rig.driveSeat = nil
 	end
 	Net.Cue("CrashMetal", carrier.Position)
-	Net.Event("Toast"):FireAllClients("Crane set up on its outriggers! Operator: climb into the crane cab (Operate crane)")
+	local owner = S.JobService.Owning(rig.model)
+	if owner then
+		S.JobService.Toast(owner, "Crane set up on its outriggers! Operator: climb into the crane cab (Operate crane)")
+	end
 end
 
 -- On its wheels: standing still on its pad for a second sets it up.
@@ -1297,7 +1304,7 @@ function Equipment.SpawnFor(bp: any, originCF: CFrame, parent: Instance)
 				pp.Parent = pad
 				S.JobService.RegisterPrompt(pp, function(p: Player)
 					local carrier = rig.model.PrimaryPart
-					if rig.mode ~= "drive" or not carrier then
+					if rig.mode ~= "drive" or not carrier or not S.JobService.MayUse(p, rig.model) then
 						return
 					end
 					if flat(carrier.Position - pad.Position) > PAD_TOL then
@@ -1313,19 +1320,26 @@ function Equipment.SpawnFor(bp: any, originCF: CFrame, parent: Instance)
 	end
 end
 
-function Equipment.Clear()
-	for _, r in rigs do
-		r.digging = false
-		r.session = nil
-		if r.model.Parent then
-			r.model:Destroy()
+-- Removes the machines and crane pads of one site (each crew's job has its own; nil = every site).
+function Equipment.Clear(site: Instance?)
+	for i = #rigs, 1, -1 do
+		local r = rigs[i]
+		if not site or not r.model.Parent or r.model:IsDescendantOf(site) then
+			r.digging = false
+			r.session = nil
+			if r.model.Parent then
+				r.model:Destroy()
+			end
+			table.remove(rigs, i)
 		end
 	end
-	table.clear(rigs)
-	for _, p in pads do
-		p:Destroy()
+	for i = #pads, 1, -1 do
+		local p = pads[i]
+		if not site or not p.Parent or p:IsDescendantOf(site) then
+			p:Destroy()
+			table.remove(pads, i)
+		end
 	end
-	table.clear(pads)
 end
 
 -- Sets the crane up on its pad (bots, when their drive didn't stop it there).
@@ -1333,12 +1347,16 @@ function Equipment.SetUp(rig: Rig)
 	setUp(rig, true)
 end
 
--- Is this player operating a machine of `kind` that can reach `target`? Returns the rig or a reason.
-function Equipment.CheckOperator(p: Instance, kind: string, target: Vector3): (Rig?, string?)
+-- Is this player operating a machine of `kind` (on `site`, when given) that can reach `target`? Returns the rig or a
+-- reason.
+function Equipment.CheckOperator(p: Instance, kind: string, target: Vector3, site: Instance?): (Rig?, string?)
 	local c = if p:IsA("Player") then p.Character else p -- players and bots
 	local hum = c and c:FindFirstChildOfClass("Humanoid")
 	local seatPart = hum and hum.SeatPart
 	for _, r in rigs do
+		if site and not r.model:IsDescendantOf(site) then
+			continue
+		end
 		if r.kind == kind and r.model.Parent and seatPart ~= nil and seatPart == r.driveSeat and r.mode ~= "set" then
 			return nil, "Drive the crane onto the glowing CRANE PAD and stop: it sets itself up"
 		end
@@ -1364,9 +1382,9 @@ function Equipment.CheckOperator(p: Instance, kind: string, target: Vector3): (R
 end
 
 -- The site's machine of this kind, if any (bots look it up to climb in).
-function Equipment.Find(kind: string): Rig?
+function Equipment.Find(kind: string, site: Instance?): Rig?
 	for _, r in rigs do
-		if r.kind == kind and r.model.Parent then
+		if r.kind == kind and r.model.Parent and (not site or r.model:IsDescendantOf(site)) then
 			return r
 		end
 	end

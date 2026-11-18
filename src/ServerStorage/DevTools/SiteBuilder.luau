@@ -1,14 +1,16 @@
 --!strict
--- DEV TOOL (never required by game code). Builds the 4 construction sites in Workspace.Sites:
+-- DEV TOOL (never required by game code). Builds every construction lot in Workspace.Sites (2026-11-17: several lots
+-- per tier, ServerStorage.Config.Sites Lots; signs read "SITE 1A", "SITE 1B" ...):
 -- chain-link fence with a road gate, site office trailer, dumpster, porta-potties, staging and delivery signs,
 -- floodlights and a tier/pay sign. Also adds the "start job" buttons under the RV park site board and retires
 -- the gray-box yard (old job board removed, spawn moved into the RV park until stage 4 adds RV spawns).
 -- The job itself (ghost slots, material piles) is built at runtime by JobService at the same place.
--- Run in Studio Edit mode:  require(game.ServerStorage.DevTools.SiteBuilder).All()   (safe to re-run)
+-- Run in Studio Edit mode:  require(game.ServerStorage.DevTools.SiteBuilder:Clone()).All()   (safe to re-run: only
+-- rebuilds Workspace.Sites; .Buttons() rebuilds the board buttons). New lots need DevTools/LotBuilder first.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 
-local Layout = require(ReplicatedStorage.Shared.Config.TownLayout) :: any
+local Lots = require(ReplicatedStorage.Shared.Util.Lots) :: any
 local Display = require(ReplicatedStorage.Shared.Config.Sites) :: any
 local SitesConfig = require(ServerStorage.Config.Sites) :: any
 local JobsConfig = require(ServerStorage.Config.Jobs) :: any
@@ -99,12 +101,11 @@ local function money(n: number): string
 end
 
 local function lotOf(id: string): any
-	for _, lot in Layout.Lots do
-		if lot.Id == id then
-			return lot
-		end
+	local lot = Lots.Get(id)
+	if not lot then
+		error("TownLayout has no lot " .. id)
 	end
-	error("TownLayout has no lot " .. id)
+	return lot
 end
 
 local function displayOf(tier: number): any
@@ -116,9 +117,12 @@ local function displayOf(tier: number): any
 	return { Name = "Site " .. tier }
 end
 
-local function buildSite(siteId: string, parent: Instance): number
+-- One lot of a tier (siteId = the tier key, lotId = the lot, index = its letter: 1 = A).
+local function buildSite(siteId: string, lotId: string, index: number, parent: Instance): number
 	local cfg = SitesConfig[siteId]
-	local lot = lotOf(siteId)
+	local lot = lotOf(lotId)
+	local name = ("SITE %d%s"):format(cfg.Tier, Lots.Letter(index))
+	local yaw = Lots.Yaw(lot)
 	local job = JobsConfig[cfg.Job]
 	local bp = require(ReplicatedStorage.Shared.Blueprints:FindFirstChild(job.Blueprint) :: ModuleScript) :: any
 	local disp = displayOf(cfg.Tier)
@@ -126,8 +130,8 @@ local function buildSite(siteId: string, parent: Instance): number
 
 	-- Same placement JobService uses: lot center, turned so local -Z (front) faces the road gate.
 	local center = Vector3.new((lot.Min.X + lot.Max.X) / 2, 0, (lot.Min.Y + lot.Max.Y) / 2)
-	local O = CFrame.new(center) * CFrame.Angles(0, cfg.Yaw, 0)
-	local sideways = math.abs(math.sin(cfg.Yaw)) > 0.5
+	local O = CFrame.new(center) * CFrame.Angles(0, yaw, 0)
+	local sideways = math.abs(math.sin(yaw)) > 0.5
 	local wx, wz = (lot.Max.X - lot.Min.X) / 2, (lot.Max.Y - lot.Min.Y) / 2
 	local hx, hz = if sideways then wz else wx, if sideways then wx else wz
 	local function at(x: number, y: number, z: number): CFrame
@@ -138,8 +142,9 @@ local function buildSite(siteId: string, parent: Instance): number
 	end
 
 	local m = Instance.new("Model")
-	m.Name = siteId
+	m.Name = lotId
 	m:SetAttribute("Tier", cfg.Tier)
+	m:SetAttribute("SiteKey", siteId)
 
 	-- Chain-link fence: steel posts, top rail, see-through mesh. Open gate at the front (road side).
 	local fence = model("Fence", m)
@@ -181,7 +186,7 @@ local function buildSite(siteId: string, parent: Instance): number
 	end
 	local board = box("Board", Vector3.new(14, 7, 0.4), facing(sx, 7, sz, sx, sz - 30), tint, M.Metal, sign)
 	local lines = {
-		{ text = "SITE " .. cfg.Tier, size = 0.22, color = C(255, 230, 150) },
+		{ text = name, size = 0.22, color = C(255, 230, 150) },
 		{ text = string.upper(disp.Name), size = 0.3 },
 		{ text = ("TIER %d  |  %s each  |  %d min"):format(cfg.Tier, money(job.BasePay), job.Deadline // 60), size = 0.2 },
 	}
@@ -189,7 +194,7 @@ local function buildSite(siteId: string, parent: Instance): number
 		table.insert(lines, { text = "COMING IN AN UPDATE", size = 0.16, color = C(255, 170, 160) })
 	end
 	surfaceText(board, Enum.NormalId.Front, lines, 30)
-	surfaceText(board, Enum.NormalId.Back, { { text = "SITE " .. cfg.Tier .. " - " .. string.upper(disp.Name), size = 0.4 } }, 30)
+	surfaceText(board, Enum.NormalId.Back, { { text = name .. " - " .. string.upper(disp.Name), size = 0.4 } }, 30)
 
 	-- Site office trailer near the front-left corner, door facing into the site
 	local tr = model("SiteTrailer", m)
@@ -295,7 +300,7 @@ local function buildSite(siteId: string, parent: Instance): number
 
 	-- The stage-1 temporary sign at this lot is replaced by the tier sign.
 	local lots = workspace:FindFirstChild("Town") and workspace.Town:FindFirstChild("Lots")
-	local marker = lots and lots:FindFirstChild(siteId)
+	local marker = lots and lots:FindFirstChild(lotId)
 	local temp = marker and marker:FindFirstChild("TempSign")
 	if temp then
 		temp:Destroy()
@@ -357,6 +362,8 @@ local function retireYard(): string
 	return "no SpawnLocation found"
 end
 
+-- Rebuilds Workspace.Sites: every lot of every tier. (The board buttons and the spawn are left alone: the camp
+-- polish redid the spawn, and the buttons don't change with more lots.)
 function Builder.All(): string
 	local root = workspace:FindFirstChild("Sites")
 	if root then
@@ -367,11 +374,19 @@ function Builder.All(): string
 	sites.Parent = workspace
 	local counts = {}
 	for _, siteId in SitesConfig.Order do
-		table.insert(counts, ("%s=%d parts"):format(siteId, buildSite(siteId, sites)))
-		task.wait()
+		for i, lotId in SitesConfig[siteId].Lots do
+			table.insert(counts, ("%s=%d"):format(lotId, buildSite(siteId, lotId, i, sites)))
+			task.wait()
+		end
 	end
-	local buttons = buildBoardButtons()
-	return ("sites built: %s; %d board buttons; %s"):format(table.concat(counts, ", "), buttons, retireYard())
+	return ("lots built: %s"):format(table.concat(counts, ", "))
 end
+
+function Builder.Buttons(): string
+	return ("%d board buttons"):format(buildBoardButtons())
+end
+
+-- (old stage-3 step, kept for reference; All() no longer runs it)
+Builder.RetireYard = retireYard
 
 return Builder

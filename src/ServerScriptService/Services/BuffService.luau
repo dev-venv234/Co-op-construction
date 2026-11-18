@@ -36,12 +36,14 @@ function Buff.Grant(p: Player)
 	apply(p)
 end
 
--- Called by JobService when a job ends (paid or failed).
-function Buff.EndJob()
-	for p in awake do
-		awake[p] = nil
-		if p.Parent then
-			apply(p)
+-- Called by JobService when a crew's job ends (paid or failed): that crew's coffee wears off.
+function Buff.EndJob(players: { Player })
+	for _, p in players do
+		if awake[p] then
+			awake[p] = nil
+			if p.Parent then
+				apply(p)
+			end
 		end
 	end
 end
