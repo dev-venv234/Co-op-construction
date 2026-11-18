@@ -1,10 +1,12 @@
 --!strict
 -- Crew vs crew on one server (owner 2026-11-17: "its still co op in your team/company/crew but your competing against
 -- other crews"). Everything here is decided on the server from server-side job results.
---  * Standings: every job a crew finishes (passes inspection) earns crew points: BasePay / 100 x the grade
---    (A+ 1.5, A 1.3, B 1.1, C 1, D 0.8), +2 for finishing early, +5 for winning a race. Points last as long as the
---    crew exists on this server. The leading crew wears a crown (player attribute TopCrew) and the server hears it
---    when the lead changes.
+--  * Standings (owner: "competing for the top spot ... based off amount of pay made, xp, and quality of work"): every
+--    job a crew passes adds what it really earned. Crew score = pay / PAY_PER_POINT (all members' paychecks, without
+--    the 2x Pay pass, so rank can't be bought) + XP / XP_PER_POINT (all XP the members earned on the job) + the job's
+--    quality (average task accuracy, 0-100 points per job) + RACE_POINTS for a race win. Kept as long as the crew
+--    exists on this server. The leading crew wears a crown (player attribute TopCrew) and the server hears it when
+--    the lead changes.
 --  * Races: a crew that starts the same site (tier) as another crew within RACE_WINDOW seconds of it is in a race with
 --    it. The first of the two to pass inspection wins RACE_BONUS extra pay (on each paid member's paycheck, before the
 --    2x Pay pass) and the race points. The other crew is paid as usual: a race never costs anything. If the rival
@@ -18,11 +20,12 @@ local League = {}
 
 local RACE_WINDOW = 90 -- seconds between two crews starting the same site for it to be a race
 local RACE_BONUS = 0.2 -- extra pay for the race winner (share of each paid member's paycheck)
-local RACE_POINTS = 5
-local EARLY_POINTS = 2
-local GRADE_MULT = { ["A+"] = 1.5, A = 1.3, B = 1.1, C = 1, D = 0.8 }
+local RACE_POINTS = 50
+local PAY_PER_POINT = 10 -- $10 of crew pay = 1 point
+local XP_PER_POINT = 5 -- 5 XP = 1 point
+local QUALITY_POINTS = 100 -- a perfect job (100% accuracy) = 100 points
 
-type Score = { points: number, jobs: number, best: string?, wins: number }
+type Score = { points: number, jobs: number, best: string?, wins: number, pay: number, xp: number, quality: number }
 
 local S: any
 local Toast: RemoteEvent
@@ -36,7 +39,7 @@ end
 local function scoreOf(crew: any): Score
 	local s = scores[crew]
 	if not s then
-		s = { points = 0, jobs = 0, best = nil, wins = 0 }
+		s = { points = 0, jobs = 0, best = nil, wins = 0, pay = 0, xp = 0, quality = 0 }
 		scores[crew] = s
 	end
 	return s
@@ -56,6 +59,9 @@ function League.Standings(): { { [string]: any } }
 			jobs = if s then s.jobs else 0,
 			best = if s then s.best else nil,
 			wins = if s then s.wins else 0,
+			pay = if s then s.pay else 0,
+			xp = if s then s.xp else 0,
+			quality = if s and s.jobs > 0 then math.floor(s.quality / s.jobs * 100 + 0.5) else nil, -- average %
 		})
 	end
 	table.sort(out, function(a, b)
@@ -131,13 +137,24 @@ function League.ClaimRace(cur: any): number
 	return RACE_BONUS
 end
 
--- Called by JobService.finish after the payout of a job that passed inspection.
-function League.JobDone(cur: any, grade: string, early: boolean)
+local function commas(n: number): string
+	local str = tostring(math.floor(n))
+	local out = str:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+	return (out:gsub("^,", ""))
+end
+
+-- Called by JobService.finish after the payout of a job that passed inspection: what the crew earned on it
+-- (pay without the 2x pass, XP its members earned, average task accuracy 0..1).
+function League.JobDone(cur: any, grade: string, accuracy: number, pay: number, xp: number)
 	local s = scoreOf(cur.crew)
 	local won = cur.race ~= nil and cur.race.result == "won"
-	local pts = math.floor(cur.cfg.BasePay / 100 * (GRADE_MULT[grade] or 1) + 0.5)
-		+ (if early then EARLY_POINTS else 0) + (if won then RACE_POINTS else 0)
+	local acc = math.clamp(accuracy, 0, 1)
+	local pts = math.floor(math.max(0, pay) / PAY_PER_POINT + math.max(0, xp) / XP_PER_POINT + acc * QUALITY_POINTS + 0.5)
+		+ (if won then RACE_POINTS else 0)
 	s.points += pts
+	s.pay += math.max(0, pay)
+	s.xp += math.max(0, xp)
+	s.quality += acc
 	s.jobs += 1
 	if won then
 		s.wins += 1
@@ -145,7 +162,8 @@ function League.JobDone(cur: any, grade: string, early: boolean)
 	if not s.best or (GRADE_ORDER[grade] or 0) > (GRADE_ORDER[s.best] or 0) then
 		s.best = grade
 	end
-	S.JobService.Toast(cur, ("+%d crew points (%d total)"):format(pts, s.points))
+	S.JobService.Toast(cur, ("+%s crew points: $%s pay, %s XP, %d%% quality%s (%s total)"):format(commas(pts), commas(pay),
+		commas(xp), math.floor(acc * 100 + 0.5), if won then ", race win" else "", commas(s.points)))
 	refreshLeader(true)
 	S.JobService.Broadcast()
 end

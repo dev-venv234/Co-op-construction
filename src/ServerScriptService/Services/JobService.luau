@@ -411,7 +411,7 @@ local function complete(cur: Current, slot: any, p: Instance, accuracy: number)
 		cur.roleWorked[slot.def.Role] = os.clock() -- a player is working this trade (StalledRoles)
 	end
 	S.QualityService.Record(cur.quality, p, slot.def.Id, accuracy)
-	S.ProgressionService.AwardTask(p, accuracy)
+	cur.xpEarned = (cur.xpEarned or 0) + S.ProgressionService.AwardTask(p, accuracy)
 	S.BlueprintService.SetVisual(slot, "done")
 	if S.DetailService then
 		S.DetailService.OnDone(cur, slot) -- siding, windows, doors, pitched roofs
@@ -796,7 +796,7 @@ local function onLoadTruck(cur: Current, p: Player)
 	S.VehicleService.AddCargo(cur.truck, item, cur.bp.Items[item])
 	Net.Cue("Place", cur.truck.bed.Position)
 	S.QualityService.Record(cur.quality, p, "load_" .. item, 1)
-	S.ProgressionService.AwardTask(p, 1)
+	cur.xpEarned = (cur.xpEarned or 0) + S.ProgressionService.AwardTask(p, 1)
 	local have, total = loadProgress(cur)
 	local onT, target = tripProgress(cur)
 	if onT >= target and have < total then
@@ -865,7 +865,7 @@ local function loadBundles(cur: Current, p: Player?, item: string, stack: BasePa
 				Net.Cue("Place", bed.Position)
 				if p and p.Parent then
 					S.QualityService.Record(cur.quality, p, "load_" .. item, 1)
-					S.ProgressionService.AwardTask(p, 1)
+					cur.xpEarned = (cur.xpEarned or 0) + S.ProgressionService.AwardTask(p, 1)
 				end
 			end
 		end
@@ -1271,6 +1271,7 @@ finish = function(cur: Current, success: boolean, damage: { [Player]: number }?,
 			end
 		end
 		local paidPlayers: { Player } = {}
+		local crewPay = 0 -- what the crew earned on this job, without the 2x Pay pass (server standings)
 		for _, pl in members do
 			local tasks = contributors[pl] or 0
 			local myDamage = if damage then damage[pl] or 0 else 0
@@ -1292,9 +1293,10 @@ finish = function(cur: Current, success: boolean, damage: { [Player]: number }?,
 				-- job XP and company points need at least half a fair share
 				if share >= 0.5 then
 					table.insert(paidPlayers, pl)
-					S.ProgressionService.AwardJob(pl)
+					cur.xpEarned = (cur.xpEarned or 0) + S.ProgressionService.AwardJob(pl)
 				end
 				S.DataService.RecordJob(pl, earned, grade)
+				crewPay += net + race
 				if S.DataService.MarkFirstPayout(pl) then
 					note = "First paycheck! Your own RV at the RV park is unlocked: next shift starts there."
 				end
@@ -1329,9 +1331,9 @@ finish = function(cur: Current, success: boolean, damage: { [Player]: number }?,
 		if S.CompanyService and #paidPlayers > 0 then
 			S.CompanyService.AddJob(paidPlayers, cur.cfg.BasePay, grade)
 		end
-		-- crew points on this server's standings
+		-- this server's crew standings: pay, XP and quality of work
 		if S.LeagueService then
-			S.LeagueService.JobDone(cur, grade, parts.early == true)
+			S.LeagueService.JobDone(cur, grade, avg, crewPay, cur.xpEarned or 0)
 		end
 	else
 		for _, pl in members do

@@ -686,10 +686,14 @@ The owner also pulled in two more trades, Welder and HVAC, and a tool shop on 20
 
 - **Crew vs crew (2026-11-17, owner: "its still co op in your team/company/crew but your competing against other
   crews"):** `LeagueService` (new, server). Co-op inside a crew, competition between crews on the same server.
-  * Crew points per passed job: round(BasePay / 100 x grade mult (A+ 1.5, A 1.3, B 1.1, C 1, D 0.8)) + 2 if early
-    + 5 for a race win (shed A = 7, starter house A = 20). Kept per crew while it exists on the server. Standings
-    go out with the crew board (`Crews` remote, field `league`) and show at the top of the CREW panel. The leading
-    crew gets player attribute `TopCrew` (gold "#1" tag) and the server is told when the lead changes.
+  * Crew score (owner, same day: crews compete "based off amount of pay made, xp, and quality of work"): per passed
+    job, + crew pay / 10 (every member's net paycheck incl. race bonus, **without** the 2x Pay pass so rank can't be
+    bought) + crew XP / 5 (XP the members actually got: `ProgressionService.AwardTask/AwardJob` now return the XP
+    given, JobService sums it in `cur.xpEarned`) + quality (job's average accuracy x 100) + 50 for a race win.
+    Standings keep pay, XP, average quality %, jobs, race wins and points per crew while it exists on the server;
+    they go out with the crew board (`Crews` remote, field `league`) and show at the top of the CREW panel (points,
+    then "$pay | XP | quality | jobs"). The leading crew gets player attribute `TopCrew` (gold "#1" tag) and the
+    server is told when the lead changes.
   * Races: a crew starting the same site (tier key) as another crew within 90 s is paired with it (`cur.race`). The
     first to pass inspection wins: `JobService.finish` asks `LeagueService.ClaimRace(cur)` before payout, and each
     paid member gets +20% of their net paycheck (`raceBonus` on the payout screen; not doubled by the 2x pass). The

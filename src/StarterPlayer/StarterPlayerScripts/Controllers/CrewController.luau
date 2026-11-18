@@ -295,15 +295,22 @@ function Crew.Start()
 			end
 		end
 		if #league > 0 then
-			header("SERVER STANDINGS  -  finish jobs and win races for crew points")
+			header("SERVER STANDINGS  -  crew score = pay + XP + quality of work")
+			local function commas(n: number): string
+				local s = tostring(math.floor(n))
+				local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+				return (out:gsub("^,", ""))
+			end
 			for rank, st in league do
-				local r = row(34, if st.id == myId then Color3.fromRGB(40, 70, 55) else Color3.fromRGB(40, 41, 48))
-				local crown = if rank == 1 and anyPoints then "[#1] " else ("%d. "):format(rank)
-				text(r, ("%s%s  -  %d pts  |  %d job%s%s%s"):format(crown, tostring(st.name), st.points or 0, st.jobs or 0,
-					if (st.jobs or 0) == 1 then "" else "s", if st.best then "  |  best " .. tostring(st.best) else "",
-					if (st.wins or 0) > 0 then ("  |  %d race win%s"):format(st.wins, if st.wins == 1 then "" else "s") else ""),
-					UDim2.new(0, 10, 0, 5), UDim2.new(1, -20, 1, -10), Enum.Font.GothamBold,
-					if rank == 1 and anyPoints then Color3.fromRGB(255, 210, 90) else Color3.new(1, 1, 1))
+				local top = rank == 1 and anyPoints
+				local r = row(52, if st.id == myId then Color3.fromRGB(40, 70, 55) else Color3.fromRGB(40, 41, 48))
+				text(r, ("%s%s  -  %s pts"):format(if top then "[#1] " else ("%d. "):format(rank), tostring(st.name),
+					commas(st.points or 0)), UDim2.new(0, 10, 0, 4), UDim2.new(1, -20, 0, 24), Enum.Font.GothamBlack,
+					if top then Color3.fromRGB(255, 210, 90) else Color3.new(1, 1, 1))
+				local detail = ("$%s pay  |  %s XP  |  %s quality  |  %d job%s%s"):format(commas(st.pay or 0), commas(st.xp or 0),
+					if st.quality then tostring(st.quality) .. "%" else "-", st.jobs or 0, if (st.jobs or 0) == 1 then "" else "s",
+					if (st.wins or 0) > 0 then ("  |  %d race win%s"):format(st.wins, if st.wins == 1 then "" else "s") else "")
+				text(r, detail, UDim2.new(0, 10, 0, 29), UDim2.new(1, -20, 0, 18), Enum.Font.Gotham, Color3.fromRGB(205, 210, 220))
 			end
 		end
 

@@ -95,11 +95,16 @@ local function publish(p: Player)
 	p:SetAttribute("ProgressXP", math.floor(math.max(bestXP, 0)))
 end
 
-local function add(p: Player, xp: number)
+-- Returns the XP actually given (0 for bots, players without a trade, or nothing to give): JobService adds it to
+-- the crew's total for the server standings (LeagueService).
+local function add(p: Player, xp: number): number
+	if not p:IsA("Player") then
+		return 0
+	end
 	local trade = S.CrewService.GetRole(p)
 	local prof = S.DataService.Get(p)
 	if not trade or not prof or xp <= 0 then
-		return
+		return 0
 	end
 	local Toast = Net.Event("Toast")
 	local levelBefore = Progression.LevelFor(prof.XP[trade] or 0)
@@ -114,19 +119,21 @@ local function add(p: Player, xp: number)
 	if tierAfter > tierBefore then
 		Toast:FireClient(p, ("New job site unlocked: Site %d"):format(tierAfter))
 	end
+	return xp
 end
 
-function Progression.AwardTask(p: Player, accuracy: number)
-	add(p, math.floor(TASK_XP * math.clamp(accuracy, 0, 1) + 0.5))
+function Progression.AwardTask(p: Player, accuracy: number): number
+	return add(p, math.floor(TASK_XP * math.clamp(accuracy, 0, 1) + 0.5))
 end
 
-function Progression.AwardJob(p: Player)
-	add(p, JOB_XP)
+function Progression.AwardJob(p: Player): number
+	local gained = add(p, JOB_XP)
 	local nextTier, level, need = p:GetAttribute("NextSiteTier"), p:GetAttribute("NextSiteLevel"), p:GetAttribute("NextSiteXP")
 	if typeof(nextTier) == "number" and typeof(level) == "number" and typeof(need) == "number" then
 		Net.Event("Toast"):FireClient(p, ("Site %d unlocks at level %d in any trade: your %s is at %d / %d XP"):format(
 			nextTier, level, tostring(p:GetAttribute("ProgressTrade")), p:GetAttribute("ProgressXP") or 0, need))
 	end
+	return gained
 end
 
 function Progression.Start()
